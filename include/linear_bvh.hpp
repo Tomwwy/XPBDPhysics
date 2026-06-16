@@ -1,15 +1,18 @@
-// mlsh/linear_bvh.hpp -- a Morton-code linear BVH for broadphase comparisons.
+// linear_bvh.hpp -- a Morton-code linear BVH for broadphase comparisons.
 //
-// This is a companion structure to MultiLevelSpatialHash. It stores the same
-// Collider interface and ObjectId style, but accelerates analytic object AABBs
-// instead of conservative occupied grid cells. Range queries therefore return
-// objects whose Collider::bounds() overlaps the query; raycast still uses the
-// Collider exact narrowphase after traversing the BVH bounds.
-#ifndef MLSH_LINEAR_BVH_HPP
-#define MLSH_LINEAR_BVH_HPP
+// Self-contained broadphase BVH. Drop this header + utils/ + unordered_dense/
+// into your project and include "linear_bvh.hpp".
+//
+// Provides:
+//   - AABB / sphere overlap queries
+//   - self-overlap pair extraction
+//   - raycast with narrowphase fallback (Collider::raycast)
+//   - incremental insert / update / remove with lazy rebuild
+#ifndef UTILS_LINEAR_BVH_HPP
+#define UTILS_LINEAR_BVH_HPP
 
-#include "collider.hpp"
-#include "math.hpp"
+#include "utils/collider.hpp"
+#include "utils/math.hpp"
 #include "unordered_dense/unordered_dense.h"
 
 #include <algorithm>
@@ -26,7 +29,7 @@
 #include <intrin.h>
 #endif
 
-namespace mlsh {
+namespace utils {
 
 class LinearBVH {
     template <typename Key, typename Value>
@@ -1024,6 +1027,6 @@ private:
     static constexpr size_t kDeferredInsertBatchThreshold = 64;
 };
 
-}  // namespace mlsh
+}  // namespace utils
 
-#endif  // MLSH_LINEAR_BVH_HPP
+#endif  // UTILS_LINEAR_BVH_HPP

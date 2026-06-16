@@ -32,6 +32,8 @@ set_target_properties(raylib PROPERTIES
 
 add_executable(xpbd_physics main.cpp)
 
+target_include_directories(xpbd_physics PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+
 if(MSVC)
     target_compile_options(xpbd_physics PRIVATE /W4)
 else()
