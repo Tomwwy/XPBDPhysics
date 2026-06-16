@@ -1,6 +1,8 @@
 #ifndef XPBD_WORLD_HPP
 #define XPBD_WORLD_HPP
 
+#include "xpbd/xpbd_simd.hpp"
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -179,11 +181,11 @@ public:
             index = static_cast<std::uint32_t>(data_.size());
             data_.push_back(T{});
             generations_.push_back(1);
-            alive_.push_back(false);
+            alive_.push_back(0);
         }
 
         data_[index] = value;
-        alive_[index] = true;
+        alive_[index] = 1;
         return Entity::make(type, index, generations_[index]);
     }
 
@@ -194,7 +196,7 @@ public:
             return false;
         }
 
-        alive_[index] = false;
+        alive_[index] = 0;
         generations_[index] = nextGeneration(generations_[index]);
         freeList_.push_back(index);
         return true;
@@ -204,7 +206,7 @@ public:
     {
         const std::uint32_t index = entity.index();
         return index < alive_.size() &&
-               alive_[index] &&
+               alive_[index] != 0 &&
                generations_[index] == entity.generation();
     }
 
@@ -222,10 +224,10 @@ public:
     {
         freeList_.clear();
         for (std::uint32_t index = 0; index < data_.size(); ++index) {
-            if (alive_[index]) {
+            if (alive_[index] != 0) {
                 generations_[index] = nextGeneration(generations_[index]);
             }
-            alive_[index] = false;
+            alive_[index] = 0;
             freeList_.push_back(index);
         }
     }
@@ -248,11 +250,26 @@ public:
         return alive_.size() - freeList_.size();
     }
 
+    T* data()
+    {
+        return data_.empty() ? nullptr : data_.data();
+    }
+
+    const T* data() const
+    {
+        return data_.empty() ? nullptr : data_.data();
+    }
+
+    const std::uint8_t* aliveData() const
+    {
+        return alive_.empty() ? nullptr : alive_.data();
+    }
+
     template <typename Func>
     void forEachAlive(EntityType type, Func&& func)
     {
         for (std::uint32_t index = 0; index < data_.size(); ++index) {
-            if (!alive_[index]) {
+            if (alive_[index] == 0) {
                 continue;
             }
             func(Entity::make(type, index, generations_[index]), data_[index]);
@@ -263,7 +280,7 @@ public:
     void forEachAlive(EntityType type, Func&& func) const
     {
         for (std::uint32_t index = 0; index < data_.size(); ++index) {
-            if (!alive_[index]) {
+            if (alive_[index] == 0) {
                 continue;
             }
             func(Entity::make(type, index, generations_[index]), data_[index]);
@@ -279,7 +296,7 @@ private:
 
     std::vector<T> data_;
     std::vector<std::uint16_t> generations_;
-    std::vector<bool> alive_;
+    std::vector<std::uint8_t> alive_;
     std::vector<std::uint32_t> freeList_;
 };
 
@@ -287,179 +304,49 @@ class XPBDWorld {
 public:
     using System = std::function<void(XPBDWorld&, float)>;
 
-    Entity createParticle(const Vec3& position, float mass, float radius = 0.025f)
-    {
-        Particle particle;
-        particle.position = position;
-        particle.previousPosition = position;
-        particle.velocity = {};
-        particle.externalAcceleration = {};
-        particle.inverseMass = mass > 0.0f ? 1.0f / mass : 0.0f;
-        particle.radius = radius;
-        return particles_.create(EntityType::Particle, particle);
-    }
+    XPBDWorld();
 
+    Entity createParticle(const Vec3& position, float mass, float radius = 0.025f);
     Entity createDistanceConstraint(Entity particleA,
                                     Entity particleB,
                                     float restLength,
-                                    float compliance = 0.0f)
-    {
-        DistanceConstraint constraint;
-        constraint.particleA = particleA;
-        constraint.particleB = particleB;
-        constraint.restLength = std::max(0.0f, restLength);
-        constraint.compliance = std::max(0.0f, compliance);
-        return distanceConstraints_.create(EntityType::DistanceConstraint, constraint);
-    }
+                                    float compliance = 0.0f);
 
-    bool destroy(Entity entity)
-    {
-        switch (entity.type()) {
-        case EntityType::Particle:
-            return particles_.destroy(entity);
-        case EntityType::DistanceConstraint:
-            return distanceConstraints_.destroy(entity);
-        default:
-            return false;
-        }
-    }
+    bool destroy(Entity entity);
+    bool alive(Entity entity) const;
 
-    bool alive(Entity entity) const
-    {
-        switch (entity.type()) {
-        case EntityType::Particle:
-            return particles_.alive(entity);
-        case EntityType::DistanceConstraint:
-            return distanceConstraints_.alive(entity);
-        default:
-            return false;
-        }
-    }
+    Particle* particle(Entity entity);
+    const Particle* particle(Entity entity) const;
 
-    Particle* particle(Entity entity)
-    {
-        return entity.type() == EntityType::Particle ? particles_.get(entity) : nullptr;
-    }
+    DistanceConstraint* distanceConstraint(Entity entity);
+    const DistanceConstraint* distanceConstraint(Entity entity) const;
 
-    const Particle* particle(Entity entity) const
-    {
-        return entity.type() == EntityType::Particle ? particles_.get(entity) : nullptr;
-    }
+    void clearEntities();
 
-    DistanceConstraint* distanceConstraint(Entity entity)
-    {
-        return entity.type() == EntityType::DistanceConstraint ? distanceConstraints_.get(entity) : nullptr;
-    }
+    void setGravity(const Vec3& gravity);
+    const Vec3& gravity() const;
 
-    const DistanceConstraint* distanceConstraint(Entity entity) const
-    {
-        return entity.type() == EntityType::DistanceConstraint ? distanceConstraints_.get(entity) : nullptr;
-    }
+    void setDamping(float damping);
+    float damping() const;
 
-    void clearEntities()
-    {
-        particles_.destroyAll();
-        distanceConstraints_.destroyAll();
-    }
+    void setSolverIterations(int iterations);
+    int solverIterations() const;
 
-    void setGravity(const Vec3& gravity)
-    {
-        gravity_ = gravity;
-    }
+    void setSubsteps(int substeps);
+    int substeps() const;
 
-    const Vec3& gravity() const
-    {
-        return gravity_;
-    }
+    void addIntegrationSystem(System system);
+    void addConstraintSystem(System system);
+    void clearSystems();
 
-    void setDamping(float damping)
-    {
-        damping_ = std::max(0.0f, std::min(damping, 1.0f));
-    }
+    void step(float dt);
 
-    float damping() const
-    {
-        return damping_;
-    }
+    std::size_t particleSlots() const;
+    std::size_t particleCount() const;
+    std::size_t distanceConstraintSlots() const;
+    std::size_t distanceConstraintCount() const;
 
-    void setSolverIterations(int iterations)
-    {
-        solverIterations_ = std::max(1, iterations);
-    }
-
-    int solverIterations() const
-    {
-        return solverIterations_;
-    }
-
-    void setSubsteps(int substeps)
-    {
-        substeps_ = std::max(1, substeps);
-    }
-
-    int substeps() const
-    {
-        return substeps_;
-    }
-
-    void addIntegrationSystem(System system)
-    {
-        integrationSystems_.push_back(std::move(system));
-    }
-
-    void addConstraintSystem(System system)
-    {
-        constraintSystems_.push_back(std::move(system));
-    }
-
-    void clearSystems()
-    {
-        integrationSystems_.clear();
-        constraintSystems_.clear();
-    }
-
-    void step(float dt)
-    {
-        if (!(dt > 0.0f)) {
-            return;
-        }
-
-        const float subDt = dt / static_cast<float>(substeps_);
-        for (int substep = 0; substep < substeps_; ++substep) {
-            for (System& system : integrationSystems_) {
-                system(*this, subDt);
-            }
-
-            resetConstraintLambdas();
-            for (int iteration = 0; iteration < solverIterations_; ++iteration) {
-                for (System& system : constraintSystems_) {
-                    system(*this, subDt);
-                }
-            }
-
-            updateParticleVelocities(subDt);
-        }
-    }
-
-    std::size_t particleSlots() const
-    {
-        return particles_.slots();
-    }
-
-    std::size_t particleCount() const
-    {
-        return particles_.aliveCount();
-    }
-
-    std::size_t distanceConstraintSlots() const
-    {
-        return distanceConstraints_.slots();
-    }
-
-    std::size_t distanceConstraintCount() const
-    {
-        return distanceConstraints_.aliveCount();
-    }
+    const char* simdBackendName() const;
 
     template <typename Func>
     void forEachParticle(Func&& func)
@@ -485,93 +372,18 @@ public:
         distanceConstraints_.forEachAlive(EntityType::DistanceConstraint, std::forward<Func>(func));
     }
 
-    static void verletIntegrationSystem(XPBDWorld& world, float dt)
-    {
-        const float dtSq = dt * dt;
-        world.forEachParticle([&world, dt, dtSq](Entity, Particle& particle) {
-            if (particle.inverseMass <= 0.0f) {
-                particle.previousPosition = particle.position;
-                particle.velocity = {};
-                particle.externalAcceleration = {};
-                return;
-            }
-
-            const Vec3 current = particle.position;
-            const Vec3 velocityStep = (particle.position - particle.previousPosition) * world.damping_;
-            const Vec3 acceleration = world.gravity_ + particle.externalAcceleration;
-            particle.position += velocityStep + acceleration * dtSq;
-            particle.previousPosition = current;
-            particle.velocity = (particle.position - particle.previousPosition) / dt;
-            particle.externalAcceleration = {};
-        });
-    }
-
-    static void distanceConstraintSystem(XPBDWorld& world, float dt)
-    {
-        const float dtSq = dt * dt;
-        if (!(dtSq > 0.0f)) {
-            return;
-        }
-
-        world.forEachDistanceConstraint([&world, dtSq](Entity, DistanceConstraint& constraint) {
-            if (!constraint.enabled) {
-                return;
-            }
-
-            Particle* particleA = world.particle(constraint.particleA);
-            Particle* particleB = world.particle(constraint.particleB);
-            if (particleA == nullptr || particleB == nullptr) {
-                return;
-            }
-
-            const float wA = particleA->inverseMass;
-            const float wB = particleB->inverseMass;
-            const float wSum = wA + wB;
-            if (wSum <= 0.0f) {
-                return;
-            }
-
-            const Vec3 delta = particleB->position - particleA->position;
-            const float dist = length(delta);
-            if (dist <= 1e-7f) {
-                return;
-            }
-
-            const Vec3 direction = delta / dist;
-            const float c = dist - constraint.restLength;
-            const float alpha = constraint.compliance / dtSq;
-            const float deltaLambda = (-c - alpha * constraint.lambda) / (wSum + alpha);
-            constraint.lambda += deltaLambda;
-
-            const Vec3 correction = direction * deltaLambda;
-            particleA->position -= correction * wA;
-            particleB->position += correction * wB;
-        });
-    }
+    static void verletIntegrationSystem(XPBDWorld& world, float dt);
+    static void distanceConstraintSystem(XPBDWorld& world, float dt);
 
 private:
-    void resetConstraintLambdas()
-    {
-        forEachDistanceConstraint([](Entity, DistanceConstraint& constraint) {
-            constraint.lambda = 0.0f;
-        });
-    }
-
-    void updateParticleVelocities(float dt)
-    {
-        if (!(dt > 0.0f)) {
-            return;
-        }
-
-        forEachParticle([dt](Entity, Particle& particle) {
-            particle.velocity = (particle.position - particle.previousPosition) / dt;
-        });
-    }
+    void resetConstraintLambdas();
+    void updateParticleVelocities(float dt);
 
     TypedStore<Particle> particles_;
     TypedStore<DistanceConstraint> distanceConstraints_;
     std::vector<System> integrationSystems_;
     std::vector<System> constraintSystems_;
+    const detail::SimdDispatch* simd_ = nullptr;
     Vec3 gravity_ = {0.0f, -9.81f, 0.0f};
     float damping_ = 0.995f;
     int solverIterations_ = 8;

@@ -30,9 +30,20 @@ set_target_properties(raylib PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${RAYLIB_INCLUDE_DIR}"
 )
 
-add_executable(xpbd_physics main.cpp)
+add_library(xpbd STATIC
+    src/xpbd/xpbd_simd.cpp
+    src/xpbd/xpbd_world.cpp
+)
 
-target_include_directories(xpbd_physics PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(xpbd PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+
+if(MSVC)
+    target_compile_options(xpbd PRIVATE /W4)
+else()
+    target_compile_options(xpbd PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_executable(xpbd_physics main.cpp)
 
 if(MSVC)
     target_compile_options(xpbd_physics PRIVATE /W4)
@@ -40,7 +51,7 @@ else()
     target_compile_options(xpbd_physics PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-target_link_libraries(xpbd_physics PRIVATE raylib)
+target_link_libraries(xpbd_physics PRIVATE xpbd raylib)
 
 add_custom_command(TARGET xpbd_physics POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different

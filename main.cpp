@@ -122,6 +122,8 @@ void drawCloth(xpbd::XPBDWorld& world)
 
 int main()
 {
+    xpbd::initializeSimd();
+
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
     InitWindow(kScreenWidth, kScreenHeight, "XPBD Physics");
     SetWindowMinSize(640, 360);
@@ -174,9 +176,10 @@ int main()
         char stats[160] = {};
         std::snprintf(stats,
                       sizeof(stats),
-                      "particles: %zu  distance constraints: %zu  %s",
+                      "particles: %zu  distance constraints: %zu  simd: %s  %s",
                       world.particleCount(),
                       world.distanceConstraintCount(),
+                      world.simdBackendName(),
                       paused ? "paused" : "running");
         DrawText(stats, 10, 34, 18, Color{210, 218, 226, 255});
 
