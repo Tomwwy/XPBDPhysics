@@ -21,13 +21,6 @@ Vector3 toRaylib(const xpbd::Vec3& value)
     return {value.x, value.y, value.z};
 }
 
-xpbd::Vec3 cross(const xpbd::Vec3& lhs, const xpbd::Vec3& rhs)
-{
-    return {lhs.y * rhs.z - lhs.z * rhs.y,
-            lhs.z * rhs.x - lhs.x * rhs.z,
-            lhs.x * rhs.y - lhs.y * rhs.x};
-}
-
 struct ClothDemo {
     int columns = 34;
     int rows = 22;
@@ -134,7 +127,7 @@ void updateClothMesh(ClothRenderer& renderer,
         const xpbd::Vec3 a = meshVertex(renderer.mesh, indexA);
         const xpbd::Vec3 b = meshVertex(renderer.mesh, indexB);
         const xpbd::Vec3 c = meshVertex(renderer.mesh, indexC);
-        const xpbd::Vec3 faceNormal = cross(b - a, c - a);
+        const xpbd::Vec3 faceNormal = xpbd::cross(b - a, c - a);
 
         addNormal(renderer.mesh, indexA, faceNormal);
         addNormal(renderer.mesh, indexB, faceNormal);

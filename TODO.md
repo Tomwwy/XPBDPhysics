@@ -1,2 +1,1 @@
-- remove repeated code e.g. Vec3 in both utils and xpbd_world
-- remember to check if entity is valid (generation number), better alive_
+

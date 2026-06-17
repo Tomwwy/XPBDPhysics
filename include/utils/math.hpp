@@ -6,75 +6,13 @@
 #ifndef UTILS_MATH_HPP
 #define UTILS_MATH_HPP
 
+#include "vec3.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <utility>
 
 namespace utils {
-
-// --- Scalar float vector ----------------------------------------------------
-struct Vec3 {
-    float x = 0.0f, y = 0.0f, z = 0.0f;
-
-    constexpr Vec3() = default;
-    constexpr Vec3(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
-
-    constexpr Vec3 operator+(const Vec3& o) const { return {x + o.x, y + o.y, z + o.z}; }
-    constexpr Vec3 operator-(const Vec3& o) const { return {x - o.x, y - o.y, z - o.z}; }
-    constexpr Vec3 operator*(float s) const { return {x * s, y * s, z * s}; }
-    constexpr Vec3 operator/(float s) const { return {x / s, y / s, z / s}; }
-    constexpr Vec3 operator-() const { return {-x, -y, -z}; }
-
-    constexpr bool operator==(const Vec3& o) const { return x == o.x && y == o.y && z == o.z; }
-    constexpr bool operator!=(const Vec3& o) const { return !(*this == o); }
-};
-
-inline constexpr Vec3 operator*(float s, const Vec3& v) { return v * s; }
-
-// --- Basic vector math (scalar, compiler auto-vectorizes) --------------------
-
-inline float dot(const Vec3& a, const Vec3& b) {
-    return a.x * b.x + a.y * b.y + a.z * b.z;
-}
-
-inline Vec3 cross(const Vec3& a, const Vec3& b) {
-    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
-}
-
-inline float lengthSq(const Vec3& v) {
-    return v.x * v.x + v.y * v.y + v.z * v.z;
-}
-
-inline float length(const Vec3& v) {
-    return std::sqrt(lengthSq(v));
-}
-
-inline Vec3 normalized(const Vec3& v) {
-    float len = length(v);
-    return len > 0.0f ? v / len : Vec3{};
-}
-
-inline float distanceSq(const Vec3& a, const Vec3& b) {
-    return lengthSq(a - b);
-}
-
-inline Vec3 vmin(const Vec3& a, const Vec3& b) {
-    return {std::fminf(a.x, b.x), std::fminf(a.y, b.y), std::fminf(a.z, b.z)};
-}
-
-inline Vec3 vmax(const Vec3& a, const Vec3& b) {
-    return {std::fmaxf(a.x, b.x), std::fmaxf(a.y, b.y), std::fmaxf(a.z, b.z)};
-}
-
-inline Vec3 vclamp(const Vec3& v, const Vec3& lo, const Vec3& hi) {
-    return {std::fmaxf(lo.x, std::fminf(hi.x, v.x)),
-            std::fmaxf(lo.y, std::fminf(hi.y, v.y)),
-            std::fmaxf(lo.z, std::fminf(hi.z, v.z))};
-}
-
-inline float maxComponent(const Vec3& v) {
-    return std::fmaxf(std::fmaxf(v.x, v.y), v.z);
-}
 
 // --- Axis-aligned bounding box ----------------------------------------------
 struct AABB {

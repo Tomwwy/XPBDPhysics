@@ -1,13 +1,14 @@
 #ifndef XPBD_SIMD_HPP
 #define XPBD_SIMD_HPP
 
+#include "xpbd/math.hpp"
+
 #include <cstddef>
 #include <cstdint>
 
 namespace xpbd {
 
 struct Particle;
-struct Vec3;
 
 enum class SimdBackend {
     Scalar,

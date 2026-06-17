@@ -1,11 +1,11 @@
 #ifndef XPBD_WORLD_HPP
 #define XPBD_WORLD_HPP
 
+#include "xpbd/math.hpp"
 #include "xpbd/xpbd_simd.hpp"
 
 #include <algorithm>
 #include <cassert>
-#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -13,71 +13,6 @@
 #include <vector>
 
 namespace xpbd {
-
-struct Vec3 {
-    float x = 0.0f;
-    float y = 0.0f;
-    float z = 0.0f;
-
-    constexpr Vec3() = default;
-    constexpr Vec3(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
-
-    constexpr Vec3 operator+(const Vec3& rhs) const { return {x + rhs.x, y + rhs.y, z + rhs.z}; }
-    constexpr Vec3 operator-(const Vec3& rhs) const { return {x - rhs.x, y - rhs.y, z - rhs.z}; }
-    constexpr Vec3 operator*(float scalar) const { return {x * scalar, y * scalar, z * scalar}; }
-    constexpr Vec3 operator/(float scalar) const { return {x / scalar, y / scalar, z / scalar}; }
-    constexpr Vec3 operator-() const { return {-x, -y, -z}; }
-
-    Vec3& operator+=(const Vec3& rhs)
-    {
-        x += rhs.x;
-        y += rhs.y;
-        z += rhs.z;
-        return *this;
-    }
-
-    Vec3& operator-=(const Vec3& rhs)
-    {
-        x -= rhs.x;
-        y -= rhs.y;
-        z -= rhs.z;
-        return *this;
-    }
-
-    Vec3& operator*=(float scalar)
-    {
-        x *= scalar;
-        y *= scalar;
-        z *= scalar;
-        return *this;
-    }
-};
-
-inline constexpr Vec3 operator*(float scalar, const Vec3& value)
-{
-    return value * scalar;
-}
-
-inline float dot(const Vec3& lhs, const Vec3& rhs)
-{
-    return lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z;
-}
-
-inline float lengthSquared(const Vec3& value)
-{
-    return dot(value, value);
-}
-
-inline float length(const Vec3& value)
-{
-    return std::sqrt(lengthSquared(value));
-}
-
-inline Vec3 normalized(const Vec3& value)
-{
-    const float len = length(value);
-    return len > 0.0f ? value / len : Vec3{};
-}
 
 enum class EntityType : std::uint16_t {
     Invalid = 0,
@@ -388,11 +323,6 @@ private:
     int solverIterations_ = 8;
     int substeps_ = 4;
 };
-
-inline float distance(const Vec3& lhs, const Vec3& rhs)
-{
-    return length(lhs - rhs);
-}
 
 }  // namespace xpbd
 
