@@ -1,6 +1,7 @@
 #ifndef XPBD_WORLD_HPP
 #define XPBD_WORLD_HPP
 
+#include "linear_bvh.hpp"
 #include "xpbd/colliders/collision_sphere.hpp"
 #include "xpbd/constraints/distance_constraint.hpp"
 #include "xpbd/entity.hpp"
@@ -8,12 +9,37 @@
 #include "xpbd/typed_store.hpp"
 #include "xpbd/xpbd_simd.hpp"
 
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace xpbd {
+
+namespace detail {
+
+struct SphereCollisionBroadphaseRef {
+    Entity entity;
+    bool particle = true;
+    CollisionLayerMask collisionLayer = 0u;
+    CollisionLayerMask collisionMask = 0u;
+    std::uint64_t lastSeenStamp = 0u;
+    bool registered = false;
+};
+
+struct SphereCollisionLayerTree {
+    utils::LinearBVH broadphase;
+    std::vector<SphereCollisionBroadphaseRef> refsByObject = {{}};
+    std::unordered_map<std::uint64_t, utils::LinearBVH::ObjectId> objectByEntity;
+    CollisionLayerMask bit = 0u;
+    CollisionLayerMask aggregateCollisionMask = 0u;
+    bool active = false;
+};
+
+}  // namespace detail
 
 class XPBDWorld {
 public:
@@ -89,6 +115,9 @@ public:
     std::size_t sphereCollisionBroadphasePairCount() const;
     std::size_t sphereCollisionContactCount() const;
     std::size_t sphereCollisionBvhNodeCount() const;
+    std::size_t sphereCollisionBvhRebuildInterval() const;
+    // 0 disables cadence rebuilds; structural changes and degradation can still rebuild lazily.
+    void setSphereCollisionBvhRebuildInterval(std::size_t interval);
 
     const char* simdBackendName() const;
 
@@ -148,6 +177,10 @@ private:
     int substeps_ = 4;
     bool sphereCollisionsEnabled_ = true;
     float sphereCollisionCompliance_ = 0.0f;
+    std::array<detail::SphereCollisionLayerTree, kCollisionLayerBitCount> sphereCollisionLayers_;
+    std::uint64_t sphereCollisionBroadphaseStamp_ = 0u;
+    std::size_t sphereCollisionBroadphaseSolveCount_ = 0u;
+    std::size_t sphereCollisionBvhRebuildInterval_ = 32u;
     std::size_t sphereCollisionBroadphasePairs_ = 0;
     std::size_t sphereCollisionContacts_ = 0;
     std::size_t sphereCollisionBvhNodes_ = 0;

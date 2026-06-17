@@ -15,27 +15,12 @@ namespace {
 
 constexpr std::size_t kSphereCollisionLayerCount = static_cast<std::size_t>(kCollisionLayerBitCount);
 
-struct SphereCollisionRef {
-    Entity entity;
-    bool particle = true;
-    CollisionLayerMask collisionLayer = 0u;
-    CollisionLayerMask collisionMask = 0u;
-};
-
 struct SphereCollisionState {
     Vec3 position;
     float radius = 0.0f;
     float inverseMass = 0.0f;
     Particle* particle = nullptr;
     bool valid = false;
-};
-
-struct SphereCollisionLayerTree {
-    utils::LinearBVH broadphase;
-    std::vector<SphereCollisionRef> refsByObject = {{}};
-    CollisionLayerMask bit = 0u;
-    CollisionLayerMask aggregateCollisionMask = 0u;
-    bool active = false;
 };
 
 struct EntityPairKey {
@@ -101,7 +86,8 @@ Vec3 fallbackCollisionNormal(Entity a, Entity b)
     }
 }
 
-SphereCollisionState sphereCollisionState(XPBDWorld& world, const SphereCollisionRef& ref)
+SphereCollisionState sphereCollisionState(XPBDWorld& world,
+                                          const detail::SphereCollisionBroadphaseRef& ref)
 {
     if (ref.particle) {
         Particle* particle = world.particle(ref.entity);
@@ -130,6 +116,35 @@ SphereCollisionState sphereCollisionState(XPBDWorld& world, const SphereCollisio
     return state;
 }
 
+void resetLayerSyncState(detail::SphereCollisionLayerTree& layer, CollisionLayerMask bit)
+{
+    layer.bit = bit;
+    layer.aggregateCollisionMask = 0u;
+    layer.active = false;
+}
+
+void removeStaleRefs(detail::SphereCollisionLayerTree& layer, std::uint64_t stamp)
+{
+    for (std::size_t objectIndex = 1u; objectIndex < layer.refsByObject.size(); ++objectIndex) {
+        detail::SphereCollisionBroadphaseRef& ref = layer.refsByObject[objectIndex];
+        if (!ref.registered || ref.lastSeenStamp == stamp) {
+            continue;
+        }
+
+        layer.objectByEntity.erase(ref.entity.value);
+        layer.broadphase.remove(static_cast<utils::LinearBVH::ObjectId>(objectIndex));
+        ref = {};
+    }
+
+    if (layer.broadphase.objectCount() == 0u) {
+        layer.broadphase.clear();
+        layer.refsByObject = {{}};
+        layer.objectByEntity.clear();
+        layer.aggregateCollisionMask = 0u;
+        layer.active = false;
+    }
+}
+
 }  // namespace
 
 void XPBDWorld::sphereCollisionSystem(XPBDWorld& world, float dt)
@@ -138,21 +153,58 @@ void XPBDWorld::sphereCollisionSystem(XPBDWorld& world, float dt)
         return;
     }
 
-    std::array<SphereCollisionLayerTree, kSphereCollisionLayerCount> layers;
+    std::array<detail::SphereCollisionLayerTree, kSphereCollisionLayerCount>& layers =
+        world.sphereCollisionLayers_;
 
-    const auto addRef = [&layers](Entity entity,
-                                  bool particle,
-                                  const Vec3& center,
-                                  float radius,
-                                  CollisionLayerMask collisionLayer,
-                                  CollisionLayerMask collisionMask) {
+    ++world.sphereCollisionBroadphaseStamp_;
+    if (world.sphereCollisionBroadphaseStamp_ == 0u) {
+        for (detail::SphereCollisionLayerTree& layer : layers) {
+            for (detail::SphereCollisionBroadphaseRef& ref : layer.refsByObject) {
+                ref.lastSeenStamp = 0u;
+            }
+        }
+        world.sphereCollisionBroadphaseStamp_ = 1u;
+    }
+    const std::uint64_t stamp = world.sphereCollisionBroadphaseStamp_;
+
+    for (std::size_t bitIndex = 0; bitIndex < layers.size(); ++bitIndex) {
+        const CollisionLayerMask bit = CollisionLayerMask{1u} << bitIndex;
+        resetLayerSyncState(layers[bitIndex], bit);
+    }
+
+    const auto addOrUpdateRef = [&layers, stamp](Entity entity,
+                                                 bool particle,
+                                                 const Vec3& center,
+                                                 float radius,
+                                                 CollisionLayerMask collisionLayer,
+                                                 CollisionLayerMask collisionMask) {
         if (collisionLayer == 0u || collisionMask == 0u) {
             return;
         }
 
         forEachCollisionLayerBit(collisionLayer, [&](std::size_t bitIndex, CollisionLayerMask bit) {
-            SphereCollisionLayerTree& layer = layers[bitIndex];
-            const utils::LinearBVH::ObjectId id = layer.broadphase.insertSphere(center, radius);
+            detail::SphereCollisionLayerTree& layer = layers[bitIndex];
+            utils::LinearBVH::ObjectId id = utils::LinearBVH::kInvalid;
+            auto objectIt = layer.objectByEntity.find(entity.value);
+            if (objectIt != layer.objectByEntity.end()) {
+                id = objectIt->second;
+                if (!layer.broadphase.updateSphere(id, center, radius)) {
+                    layer.broadphase.remove(id);
+                    layer.objectByEntity.erase(objectIt);
+                    if (static_cast<std::size_t>(id) < layer.refsByObject.size()) {
+                        layer.refsByObject[static_cast<std::size_t>(id)] = {};
+                    }
+                    id = utils::LinearBVH::kInvalid;
+                }
+            }
+
+            if (id == utils::LinearBVH::kInvalid) {
+                id = layer.broadphase.insertSphere(center, radius);
+                if (id != utils::LinearBVH::kInvalid) {
+                    layer.objectByEntity.emplace(entity.value, id);
+                }
+            }
+
             if (id == utils::LinearBVH::kInvalid) {
                 return;
             }
@@ -160,47 +212,61 @@ void XPBDWorld::sphereCollisionSystem(XPBDWorld& world, float dt)
             if (layer.refsByObject.size() <= id) {
                 layer.refsByObject.resize(static_cast<std::size_t>(id) + 1u);
             }
-            layer.refsByObject[static_cast<std::size_t>(id)] = {
-                entity,
-                particle,
-                collisionLayer,
-                collisionMask,
-            };
+
+            detail::SphereCollisionBroadphaseRef& ref = layer.refsByObject[static_cast<std::size_t>(id)];
+            ref.entity = entity;
+            ref.particle = particle;
+            ref.collisionLayer = collisionLayer;
+            ref.collisionMask = collisionMask;
+            ref.lastSeenStamp = stamp;
+            ref.registered = true;
             layer.bit = bit;
             layer.aggregateCollisionMask |= collisionMask;
             layer.active = true;
         });
     };
 
-    world.forEachParticle([&addRef](Entity entity, const Particle& particle) {
+    world.forEachParticle([&addOrUpdateRef](Entity entity, const Particle& particle) {
         if (particle.radius > 0.0f) {
-            addRef(entity,
-                   true,
-                   particle.position,
-                   particle.radius,
-                   particle.collisionLayer,
-                   particle.collisionMask);
+            addOrUpdateRef(entity,
+                           true,
+                           particle.position,
+                           particle.radius,
+                           particle.collisionLayer,
+                           particle.collisionMask);
         }
     });
 
-    world.forEachCollisionSphere([&addRef](Entity entity, const CollisionSphere& sphere) {
+    world.forEachCollisionSphere([&addOrUpdateRef](Entity entity, const CollisionSphere& sphere) {
         if (sphere.enabled && sphere.radius > 0.0f) {
-            addRef(entity,
-                   false,
-                   sphere.center,
-                   sphere.radius,
-                   sphere.collisionLayer,
-                   sphere.collisionMask);
+            addOrUpdateRef(entity,
+                           false,
+                           sphere.center,
+                           sphere.radius,
+                           sphere.collisionLayer,
+                           sphere.collisionMask);
         }
     });
+
+    for (detail::SphereCollisionLayerTree& layer : layers) {
+        removeStaleRefs(layer, stamp);
+    }
+
+    ++world.sphereCollisionBroadphaseSolveCount_;
+    const bool rebuildByCadence =
+        world.sphereCollisionBvhRebuildInterval_ > 0u &&
+        (world.sphereCollisionBroadphaseSolveCount_ % world.sphereCollisionBvhRebuildInterval_) == 0u;
 
     std::size_t activeObjectCount = 0u;
     std::size_t bvhNodeCount = 0u;
-    for (SphereCollisionLayerTree& layer : layers) {
+    for (detail::SphereCollisionLayerTree& layer : layers) {
         if (!layer.active) {
             continue;
         }
 
+        if (rebuildByCadence) {
+            layer.broadphase.rebuild();
+        }
         activeObjectCount += layer.broadphase.objectCount();
         bvhNodeCount += layer.broadphase.nodeCount();
     }
@@ -216,7 +282,8 @@ void XPBDWorld::sphereCollisionSystem(XPBDWorld& world, float dt)
     const float alpha = world.sphereCollisionCompliance_ / (dt * dt);
     std::size_t contactCount = 0;
 
-    const auto solvePair = [&](const SphereCollisionRef& refA, const SphereCollisionRef& refB) {
+    const auto solvePair = [&](const detail::SphereCollisionBroadphaseRef& refA,
+                               const detail::SphereCollisionBroadphaseRef& refB) {
         if (!collisionFiltersMatch(refA.collisionLayer,
                                    refA.collisionMask,
                                    refB.collisionLayer,
@@ -276,8 +343,8 @@ void XPBDWorld::sphereCollisionSystem(XPBDWorld& world, float dt)
         ++contactCount;
     };
 
-    const auto processPairs = [&](const SphereCollisionLayerTree& layerA,
-                                  const SphereCollisionLayerTree& layerB,
+    const auto processPairs = [&](const detail::SphereCollisionLayerTree& layerA,
+                                  const detail::SphereCollisionLayerTree& layerB,
                                   bool sameLayer) {
         pairs.clear();
         if (sameLayer) {
@@ -293,14 +360,16 @@ void XPBDWorld::sphereCollisionSystem(XPBDWorld& world, float dt)
                 continue;
             }
 
-            const SphereCollisionRef& refA = layerA.refsByObject[static_cast<std::size_t>(pair.first)];
-            const SphereCollisionRef& refB = layerB.refsByObject[static_cast<std::size_t>(pair.second)];
+            const detail::SphereCollisionBroadphaseRef& refA =
+                layerA.refsByObject[static_cast<std::size_t>(pair.first)];
+            const detail::SphereCollisionBroadphaseRef& refB =
+                layerB.refsByObject[static_cast<std::size_t>(pair.second)];
             solvePair(refA, refB);
         }
     };
 
     for (std::size_t layerIndexA = 0; layerIndexA < layers.size(); ++layerIndexA) {
-        const SphereCollisionLayerTree& layerA = layers[layerIndexA];
+        const detail::SphereCollisionLayerTree& layerA = layers[layerIndexA];
         if (!layerA.active) {
             continue;
         }
@@ -310,7 +379,7 @@ void XPBDWorld::sphereCollisionSystem(XPBDWorld& world, float dt)
         }
 
         for (std::size_t layerIndexB = layerIndexA + 1u; layerIndexB < layers.size(); ++layerIndexB) {
-            const SphereCollisionLayerTree& layerB = layers[layerIndexB];
+            const detail::SphereCollisionLayerTree& layerB = layers[layerIndexB];
             if (!layerB.active) {
                 continue;
             }

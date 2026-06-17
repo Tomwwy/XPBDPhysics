@@ -152,6 +152,7 @@ public:
         unqueriedInsertCount_ = 0;
         mortonOrderDirty_ = false;
         lastRebuildRootArea_ = 0.0f;
+        nextId_ = 1;
     }
 
     size_t objectCount() const { return objects_.size(); }
@@ -600,7 +601,6 @@ private:
             }
             refitDirty_ = true;
             mortonOrderDirty_ = true;
-            ++incrementalEditCount_;
         } else {
             markDirtyForRebuild();
         }

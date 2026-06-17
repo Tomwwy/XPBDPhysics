@@ -145,6 +145,15 @@ void XPBDWorld::clearEntities()
     particles_.destroyAll();
     distanceConstraints_.destroyAll();
     collisionSpheres_.destroyAll();
+    for (detail::SphereCollisionLayerTree& layer : sphereCollisionLayers_) {
+        layer.broadphase.clear();
+        layer.refsByObject = {{}};
+        layer.objectByEntity.clear();
+        layer.aggregateCollisionMask = 0u;
+        layer.active = false;
+    }
+    sphereCollisionBroadphaseStamp_ = 0u;
+    sphereCollisionBroadphaseSolveCount_ = 0u;
 }
 
 void XPBDWorld::setGravity(const Vec3& gravity)
@@ -293,6 +302,16 @@ std::size_t XPBDWorld::sphereCollisionContactCount() const
 std::size_t XPBDWorld::sphereCollisionBvhNodeCount() const
 {
     return sphereCollisionBvhNodes_;
+}
+
+std::size_t XPBDWorld::sphereCollisionBvhRebuildInterval() const
+{
+    return sphereCollisionBvhRebuildInterval_;
+}
+
+void XPBDWorld::setSphereCollisionBvhRebuildInterval(std::size_t interval)
+{
+    sphereCollisionBvhRebuildInterval_ = interval;
 }
 
 const char* XPBDWorld::simdBackendName() const
