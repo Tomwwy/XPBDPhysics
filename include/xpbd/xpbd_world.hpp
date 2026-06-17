@@ -21,12 +21,19 @@ public:
 
     XPBDWorld();
 
-    Entity createParticle(const Vec3& position, float mass, float radius = 0.025f);
+    Entity createParticle(const Vec3& position,
+                          float mass,
+                          float radius = 0.025f,
+                          CollisionLayerMask collisionLayer = kCollisionLayerDefault,
+                          CollisionLayerMask collisionMask = kCollisionLayerAll);
     Entity createDistanceConstraint(Entity particleA,
                                     Entity particleB,
                                     float restLength,
                                     float compliance = 0.0f);
-    Entity createCollisionSphere(const Vec3& center, float radius);
+    Entity createCollisionSphere(const Vec3& center,
+                                 float radius,
+                                 CollisionLayerMask collisionLayer = kCollisionLayerDefault,
+                                 CollisionLayerMask collisionMask = kCollisionLayerAll);
 
     bool destroy(Entity entity);
     bool alive(Entity entity) const;
@@ -39,6 +46,13 @@ public:
 
     CollisionSphere* collisionSphere(Entity entity);
     const CollisionSphere* collisionSphere(Entity entity) const;
+
+    bool setParticleCollisionFilter(Entity entity,
+                                    CollisionLayerMask collisionLayer,
+                                    CollisionLayerMask collisionMask);
+    bool setCollisionSphereFilter(Entity entity,
+                                  CollisionLayerMask collisionLayer,
+                                  CollisionLayerMask collisionMask);
 
     void clearEntities();
 

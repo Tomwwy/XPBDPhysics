@@ -317,6 +317,27 @@ public:
         collectPairs(0, 0, out);
     }
 
+    std::vector<std::pair<ObjectId, ObjectId>> overlapPairs(const LinearBVH& other) const {
+        std::vector<std::pair<ObjectId, ObjectId>> out;
+        overlapPairs(other, out);
+        return out;
+    }
+
+    void overlapPairs(const LinearBVH& other,
+                      std::vector<std::pair<ObjectId, ObjectId>>& out) const {
+        out.clear();
+        if (&other == this) {
+            overlapPairs(out);
+            return;
+        }
+        if (objects_.empty() || other.objects_.empty()) return;
+
+        ensureBuilt();
+        other.ensureBuilt();
+        reservePairOutput(out, other.objects_.size());
+        collectPairsWith(0, other, 0, out);
+    }
+
     RayHit raycast(const Vec3& origin, const Vec3& dir, float maxDist = 1e6f) const {
         RayHit best;
         best.t = maxDist;
@@ -492,6 +513,13 @@ private:
 
     void reservePairOutput(std::vector<std::pair<ObjectId, ObjectId>>& out) const {
         const size_t hint = std::min(objects_.size(), std::max<size_t>(size_t{16}, objects_.size() / 8));
+        if (out.capacity() < hint) out.reserve(hint);
+    }
+
+    void reservePairOutput(std::vector<std::pair<ObjectId, ObjectId>>& out,
+                           size_t otherObjectCount) const {
+        const size_t smaller = std::min(objects_.size(), otherObjectCount);
+        const size_t hint = std::min(smaller * 4u, std::max<size_t>(size_t{16}, smaller / 4u));
         if (out.capacity() < hint) out.reserve(hint);
     }
 
@@ -1006,6 +1034,33 @@ private:
             collectPairs(a.left, b.right, out);
             collectPairs(a.right, b.left, out);
             collectPairs(a.right, b.right, out);
+        }
+    }
+
+    void collectPairsWith(int aIdx,
+                          const LinearBVH& other,
+                          int bIdx,
+                          std::vector<std::pair<ObjectId, ObjectId>>& out) const {
+        const Node& a = nodes_[static_cast<size_t>(aIdx)];
+        const Node& b = other.nodes_[static_cast<size_t>(bIdx)];
+        if (!a.bounds.overlaps(b.bounds)) return;
+
+        if (a.leaf() && b.leaf()) {
+            out.emplace_back(sortedIds_[a.start], other.sortedIds_[b.start]);
+            return;
+        }
+
+        if (a.leaf()) {
+            collectPairsWith(aIdx, other, b.left, out);
+            collectPairsWith(aIdx, other, b.right, out);
+        } else if (b.leaf()) {
+            collectPairsWith(a.left, other, bIdx, out);
+            collectPairsWith(a.right, other, bIdx, out);
+        } else {
+            collectPairsWith(a.left, other, b.left, out);
+            collectPairsWith(a.left, other, b.right, out);
+            collectPairsWith(a.right, other, b.left, out);
+            collectPairsWith(a.right, other, b.right, out);
         }
     }
 

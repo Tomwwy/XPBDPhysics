@@ -2,18 +2,24 @@
 
 #include "linear_bvh.hpp"
 
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace xpbd {
 namespace {
 
+constexpr std::size_t kSphereCollisionLayerCount = static_cast<std::size_t>(kCollisionLayerBitCount);
+
 struct SphereCollisionRef {
     Entity entity;
     bool particle = true;
+    CollisionLayerMask collisionLayer = 0u;
+    CollisionLayerMask collisionMask = 0u;
 };
 
 struct SphereCollisionState {
@@ -23,6 +29,58 @@ struct SphereCollisionState {
     Particle* particle = nullptr;
     bool valid = false;
 };
+
+struct SphereCollisionLayerTree {
+    utils::LinearBVH broadphase;
+    std::vector<SphereCollisionRef> refsByObject = {{}};
+    CollisionLayerMask bit = 0u;
+    CollisionLayerMask aggregateCollisionMask = 0u;
+    bool active = false;
+};
+
+struct EntityPairKey {
+    std::uint64_t first = 0u;
+    std::uint64_t second = 0u;
+
+    bool operator==(const EntityPairKey& rhs) const
+    {
+        return first == rhs.first && second == rhs.second;
+    }
+};
+
+struct EntityPairKeyHash {
+    std::size_t operator()(const EntityPairKey& key) const
+    {
+        const std::uint64_t mixed = key.first ^ (key.second + UINT64_C(0x9e3779b97f4a7c15) +
+                                                 (key.first << 6u) + (key.first >> 2u));
+        return static_cast<std::size_t>(mixed ^ (mixed >> 32u));
+    }
+};
+
+template <typename Func>
+void forEachCollisionLayerBit(CollisionLayerMask layers, Func&& func)
+{
+    for (std::size_t bitIndex = 0; bitIndex < kSphereCollisionLayerCount; ++bitIndex) {
+        const CollisionLayerMask bit = CollisionLayerMask{1u} << bitIndex;
+        if ((layers & bit) != 0u) {
+            func(bitIndex, bit);
+        }
+    }
+}
+
+bool makeEntityPairKey(Entity a, Entity b, EntityPairKey& key)
+{
+    if (a == b) {
+        return false;
+    }
+
+    key.first = a.value;
+    key.second = b.value;
+    if (key.first > key.second) {
+        std::swap(key.first, key.second);
+    }
+    return true;
+}
 
 Vec3 fallbackCollisionNormal(Entity a, Entity b)
 {
@@ -80,82 +138,122 @@ void XPBDWorld::sphereCollisionSystem(XPBDWorld& world, float dt)
         return;
     }
 
-    utils::LinearBVH broadphase;
-    std::vector<SphereCollisionRef> refsByObject;
-    refsByObject.push_back({});
+    std::array<SphereCollisionLayerTree, kSphereCollisionLayerCount> layers;
 
-    const auto addRef = [&broadphase, &refsByObject](Entity entity,
-                                                     bool particle,
-                                                     const Vec3& center,
-                                                     float radius) {
-        const utils::LinearBVH::ObjectId id = broadphase.insertSphere(center, radius);
-        if (id == utils::LinearBVH::kInvalid) {
+    const auto addRef = [&layers](Entity entity,
+                                  bool particle,
+                                  const Vec3& center,
+                                  float radius,
+                                  CollisionLayerMask collisionLayer,
+                                  CollisionLayerMask collisionMask) {
+        if (collisionLayer == 0u || collisionMask == 0u) {
             return;
         }
 
-        if (refsByObject.size() <= id) {
-            refsByObject.resize(static_cast<std::size_t>(id) + 1u);
-        }
-        refsByObject[static_cast<std::size_t>(id)] = {entity, particle};
+        forEachCollisionLayerBit(collisionLayer, [&](std::size_t bitIndex, CollisionLayerMask bit) {
+            SphereCollisionLayerTree& layer = layers[bitIndex];
+            const utils::LinearBVH::ObjectId id = layer.broadphase.insertSphere(center, radius);
+            if (id == utils::LinearBVH::kInvalid) {
+                return;
+            }
+
+            if (layer.refsByObject.size() <= id) {
+                layer.refsByObject.resize(static_cast<std::size_t>(id) + 1u);
+            }
+            layer.refsByObject[static_cast<std::size_t>(id)] = {
+                entity,
+                particle,
+                collisionLayer,
+                collisionMask,
+            };
+            layer.bit = bit;
+            layer.aggregateCollisionMask |= collisionMask;
+            layer.active = true;
+        });
     };
 
     world.forEachParticle([&addRef](Entity entity, const Particle& particle) {
         if (particle.radius > 0.0f) {
-            addRef(entity, true, particle.position, particle.radius);
+            addRef(entity,
+                   true,
+                   particle.position,
+                   particle.radius,
+                   particle.collisionLayer,
+                   particle.collisionMask);
         }
     });
 
     world.forEachCollisionSphere([&addRef](Entity entity, const CollisionSphere& sphere) {
         if (sphere.enabled && sphere.radius > 0.0f) {
-            addRef(entity, false, sphere.center, sphere.radius);
+            addRef(entity,
+                   false,
+                   sphere.center,
+                   sphere.radius,
+                   sphere.collisionLayer,
+                   sphere.collisionMask);
         }
     });
 
-    if (broadphase.objectCount() < 2) {
+    std::size_t activeObjectCount = 0u;
+    std::size_t bvhNodeCount = 0u;
+    for (SphereCollisionLayerTree& layer : layers) {
+        if (!layer.active) {
+            continue;
+        }
+
+        activeObjectCount += layer.broadphase.objectCount();
+        bvhNodeCount += layer.broadphase.nodeCount();
+    }
+    world.sphereCollisionBvhNodes_ = bvhNodeCount;
+
+    if (activeObjectCount < 2) {
         return;
     }
 
     std::vector<std::pair<utils::LinearBVH::ObjectId, utils::LinearBVH::ObjectId>> pairs;
-    broadphase.overlapPairs(pairs);
-    world.sphereCollisionBroadphasePairs_ += pairs.size();
-    world.sphereCollisionBvhNodes_ = broadphase.nodeCount();
+    std::unordered_set<EntityPairKey, EntityPairKeyHash> solvedPairs;
 
     const float alpha = world.sphereCollisionCompliance_ / (dt * dt);
     std::size_t contactCount = 0;
 
-    for (const auto& pair : pairs) {
-        if (pair.first >= refsByObject.size() || pair.second >= refsByObject.size()) {
-            continue;
+    const auto solvePair = [&](const SphereCollisionRef& refA, const SphereCollisionRef& refB) {
+        if (!collisionFiltersMatch(refA.collisionLayer,
+                                   refA.collisionMask,
+                                   refB.collisionLayer,
+                                   refB.collisionMask)) {
+            return;
         }
 
-        const SphereCollisionRef& refA = refsByObject[static_cast<std::size_t>(pair.first)];
-        const SphereCollisionRef& refB = refsByObject[static_cast<std::size_t>(pair.second)];
-        if (refA.entity == refB.entity) {
-            continue;
+        EntityPairKey key;
+        if (!makeEntityPairKey(refA.entity, refB.entity, key)) {
+            return;
+        }
+        if (!solvedPairs.insert(key).second) {
+            return;
         }
 
         SphereCollisionState stateA = sphereCollisionState(world, refA);
         SphereCollisionState stateB = sphereCollisionState(world, refB);
         if (!stateA.valid || !stateB.valid) {
-            continue;
+            return;
         }
 
         const float minDistance = stateA.radius + stateB.radius;
         if (!(minDistance > 0.0f)) {
-            continue;
+            return;
         }
 
         const Vec3 delta = stateB.position - stateA.position;
         const float distSq = lengthSq(delta);
         if (distSq >= minDistance * minDistance) {
-            continue;
+            return;
         }
 
         const float wA = stateA.inverseMass;
         const float wB = stateB.inverseMass;
         const float wSum = wA + wB;
         if (wSum <= 0.0f) {
-            continue;
+            return;
         }
 
         float dist = 0.0f;
@@ -176,6 +274,53 @@ void XPBDWorld::sphereCollisionSystem(XPBDWorld& world, float dt)
             stateB.particle->position += correction * wB;
         }
         ++contactCount;
+    };
+
+    const auto processPairs = [&](const SphereCollisionLayerTree& layerA,
+                                  const SphereCollisionLayerTree& layerB,
+                                  bool sameLayer) {
+        pairs.clear();
+        if (sameLayer) {
+            layerA.broadphase.overlapPairs(pairs);
+        } else {
+            layerA.broadphase.overlapPairs(layerB.broadphase, pairs);
+        }
+        world.sphereCollisionBroadphasePairs_ += pairs.size();
+        solvedPairs.reserve(solvedPairs.size() + pairs.size());
+
+        for (const auto& pair : pairs) {
+            if (pair.first >= layerA.refsByObject.size() || pair.second >= layerB.refsByObject.size()) {
+                continue;
+            }
+
+            const SphereCollisionRef& refA = layerA.refsByObject[static_cast<std::size_t>(pair.first)];
+            const SphereCollisionRef& refB = layerB.refsByObject[static_cast<std::size_t>(pair.second)];
+            solvePair(refA, refB);
+        }
+    };
+
+    for (std::size_t layerIndexA = 0; layerIndexA < layers.size(); ++layerIndexA) {
+        const SphereCollisionLayerTree& layerA = layers[layerIndexA];
+        if (!layerA.active) {
+            continue;
+        }
+
+        if (layerA.broadphase.objectCount() >= 2 && (layerA.aggregateCollisionMask & layerA.bit) != 0u) {
+            processPairs(layerA, layerA, true);
+        }
+
+        for (std::size_t layerIndexB = layerIndexA + 1u; layerIndexB < layers.size(); ++layerIndexB) {
+            const SphereCollisionLayerTree& layerB = layers[layerIndexB];
+            if (!layerB.active) {
+                continue;
+            }
+            if ((layerA.aggregateCollisionMask & layerB.bit) == 0u ||
+                (layerB.aggregateCollisionMask & layerA.bit) == 0u) {
+                continue;
+            }
+
+            processPairs(layerA, layerB, false);
+        }
     }
 
     world.sphereCollisionContacts_ += contactCount;

@@ -10,7 +10,11 @@ XPBDWorld::XPBDWorld()
 {
 }
 
-Entity XPBDWorld::createParticle(const Vec3& position, float mass, float radius)
+Entity XPBDWorld::createParticle(const Vec3& position,
+                                 float mass,
+                                 float radius,
+                                 CollisionLayerMask collisionLayer,
+                                 CollisionLayerMask collisionMask)
 {
     Particle particle;
     particle.position = position;
@@ -19,6 +23,8 @@ Entity XPBDWorld::createParticle(const Vec3& position, float mass, float radius)
     particle.externalAcceleration = {};
     particle.inverseMass = mass > 0.0f ? 1.0f / mass : 0.0f;
     particle.radius = radius;
+    particle.collisionLayer = collisionLayer;
+    particle.collisionMask = collisionMask;
     return particles_.create(EntityType::Particle, particle);
 }
 
@@ -35,11 +41,16 @@ Entity XPBDWorld::createDistanceConstraint(Entity particleA,
     return distanceConstraints_.create(EntityType::DistanceConstraint, constraint);
 }
 
-Entity XPBDWorld::createCollisionSphere(const Vec3& center, float radius)
+Entity XPBDWorld::createCollisionSphere(const Vec3& center,
+                                        float radius,
+                                        CollisionLayerMask collisionLayer,
+                                        CollisionLayerMask collisionMask)
 {
     CollisionSphere sphere;
     sphere.center = center;
     sphere.radius = std::max(0.0f, radius);
+    sphere.collisionLayer = collisionLayer;
+    sphere.collisionMask = collisionMask;
     return collisionSpheres_.create(EntityType::SphereRigidBody, sphere);
 }
 
@@ -99,6 +110,34 @@ CollisionSphere* XPBDWorld::collisionSphere(Entity entity)
 const CollisionSphere* XPBDWorld::collisionSphere(Entity entity) const
 {
     return entity.type() == EntityType::SphereRigidBody ? collisionSpheres_.get(entity) : nullptr;
+}
+
+bool XPBDWorld::setParticleCollisionFilter(Entity entity,
+                                           CollisionLayerMask collisionLayer,
+                                           CollisionLayerMask collisionMask)
+{
+    Particle* particle = this->particle(entity);
+    if (particle == nullptr) {
+        return false;
+    }
+
+    particle->collisionLayer = collisionLayer;
+    particle->collisionMask = collisionMask;
+    return true;
+}
+
+bool XPBDWorld::setCollisionSphereFilter(Entity entity,
+                                         CollisionLayerMask collisionLayer,
+                                         CollisionLayerMask collisionMask)
+{
+    CollisionSphere* sphere = collisionSphere(entity);
+    if (sphere == nullptr) {
+        return false;
+    }
+
+    sphere->collisionLayer = collisionLayer;
+    sphere->collisionMask = collisionMask;
+    return true;
 }
 
 void XPBDWorld::clearEntities()
