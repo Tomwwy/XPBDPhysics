@@ -246,7 +246,7 @@ public:
 
     std::size_t aliveCount() const
     {
-        return alive_.size() - freeList_.size();
+        return data_.size() - freeList_.size();
     }
 
     T* data()
