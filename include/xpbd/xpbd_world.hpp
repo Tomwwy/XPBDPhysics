@@ -205,8 +205,7 @@ public:
     bool alive(Entity entity) const
     {
         const std::uint32_t index = entity.index();
-        return index < alive_.size() &&
-               alive_[index] != 0 &&
+        return index < generations_.size() &&
                generations_[index] == entity.generation();
     }
 
