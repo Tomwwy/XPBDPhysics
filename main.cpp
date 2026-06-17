@@ -4,9 +4,11 @@
 #include "xpbd/xpbd_world.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <random>
 #include <vector>
 
 namespace {
@@ -25,6 +27,7 @@ struct ClothDemo {
     int columns = 34;
     int rows = 22;
     float spacing = 0.13f;
+    xpbd::Entity collisionSphere;
     std::vector<xpbd::Entity> particles;
     std::vector<xpbd::Entity> pinnedParticles;
     std::vector<xpbd::Entity> constraints;
@@ -43,6 +46,25 @@ struct ClothRenderer {
     int columns = 0;
     int rows = 0;
 };
+
+struct RandomWindowForceSettings {
+    bool enabled = true;
+    xpbd::Vec3 center = {0.0f, 0.78f, 0.0f};
+    float width = 2.8f;
+    float height = 1.65f;
+    float depth = 1.2f;
+    float baseStrength = 18.0f;
+    float randomStrength = 16.0f;
+    float changeInterval = 0.42f;
+    float timeUntilChange = 0.0f;
+    xpbd::Vec3 currentAcceleration = {0.0f, 0.0f, 18.0f};
+    std::mt19937 rng{0x51f15eedu};
+};
+
+float clampFloat(float value, float low, float high)
+{
+    return std::max(low, std::min(high, value));
+}
 
 Color lerpColor(Color from, Color to, float amount)
 {
@@ -246,6 +268,82 @@ void addDistanceConstraint(xpbd::XPBDWorld& world,
     cloth.constraints.push_back(world.createDistanceConstraint(particleA, particleB, restLength, compliance));
 }
 
+xpbd::Vec3 sampleWindowAcceleration(RandomWindowForceSettings& settings)
+{
+    std::uniform_real_distribution<float> lateral(-0.45f, 0.45f);
+    std::uniform_real_distribution<float> vertical(-0.18f, 0.32f);
+    std::uniform_real_distribution<float> strength(0.0f, 1.0f);
+
+    const xpbd::Vec3 direction = xpbd::normalized({lateral(settings.rng), vertical(settings.rng), 1.0f});
+    return direction * (settings.baseStrength + settings.randomStrength * strength(settings.rng));
+}
+
+void applyRandomWindowForce(xpbd::XPBDWorld& world, RandomWindowForceSettings& settings, float dt)
+{
+    if (!settings.enabled || !(dt > 0.0f)) {
+        return;
+    }
+
+    settings.timeUntilChange -= dt;
+    if (settings.timeUntilChange <= 0.0f) {
+        settings.currentAcceleration = sampleWindowAcceleration(settings);
+        settings.timeUntilChange = std::max(0.02f, settings.changeInterval);
+    }
+
+    const float halfWidth = std::max(0.01f, settings.width * 0.5f);
+    const float halfHeight = std::max(0.01f, settings.height * 0.5f);
+    const float halfDepth = std::max(0.01f, settings.depth * 0.5f);
+
+    world.forEachParticle([&settings, halfWidth, halfHeight, halfDepth](xpbd::Entity, xpbd::Particle& particle) {
+        if (particle.inverseMass <= 0.0f) {
+            return;
+        }
+
+        const xpbd::Vec3 offset = particle.position - settings.center;
+        const float xAmount = std::fabs(offset.x) / halfWidth;
+        const float yAmount = std::fabs(offset.y) / halfHeight;
+        const float zAmount = std::fabs(offset.z) / halfDepth;
+        if (xAmount > 1.0f || yAmount > 1.0f || zAmount > 1.0f) {
+            return;
+        }
+
+        const float edgeAmount = std::max(xAmount, std::max(yAmount, zAmount));
+        const float falloff = clampFloat((1.0f - edgeAmount) * 4.0f, 0.0f, 1.0f);
+        particle.externalAcceleration += settings.currentAcceleration * falloff;
+    });
+}
+
+void updateRuntimeSettings(xpbd::XPBDWorld& world, RandomWindowForceSettings& settings)
+{
+    const float strengthStep = (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) ? 8.0f : 2.0f;
+    const float sizeStep = (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) ? 0.4f : 0.15f;
+
+    if (IsKeyPressed(KEY_C)) {
+        world.setSphereCollisionsEnabled(!world.sphereCollisionsEnabled());
+    }
+    if (IsKeyPressed(KEY_F)) {
+        settings.enabled = !settings.enabled;
+    }
+    if (IsKeyPressed(KEY_UP)) {
+        settings.baseStrength = clampFloat(settings.baseStrength + strengthStep, 0.0f, 90.0f);
+    }
+    if (IsKeyPressed(KEY_DOWN)) {
+        settings.baseStrength = clampFloat(settings.baseStrength - strengthStep, 0.0f, 90.0f);
+    }
+    if (IsKeyPressed(KEY_RIGHT)) {
+        settings.width = clampFloat(settings.width + sizeStep, 0.4f, 5.0f);
+    }
+    if (IsKeyPressed(KEY_LEFT)) {
+        settings.width = clampFloat(settings.width - sizeStep, 0.4f, 5.0f);
+    }
+    if (IsKeyPressed(KEY_PAGE_UP)) {
+        settings.height = clampFloat(settings.height + sizeStep, 0.4f, 3.5f);
+    }
+    if (IsKeyPressed(KEY_PAGE_DOWN)) {
+        settings.height = clampFloat(settings.height - sizeStep, 0.4f, 3.5f);
+    }
+}
+
 void buildCloth(xpbd::XPBDWorld& world, ClothDemo& cloth)
 {
     world.clearEntities();
@@ -300,6 +398,8 @@ void buildCloth(xpbd::XPBDWorld& world, ClothDemo& cloth)
             }
         }
     }
+
+    cloth.collisionSphere = world.createCollisionSphere({0.0f, 0.72f, 0.05f}, 0.52f);
 }
 
 void drawClothDebug(const xpbd::XPBDWorld& world)
@@ -333,6 +433,69 @@ void drawPinnedParticles(const xpbd::XPBDWorld& world, const ClothDemo& cloth)
         }
 
         DrawSphereEx(toRaylib(particle->position), particle->radius * 1.9f, 5, 8, Color{255, 115, 76, 255});
+    }
+}
+
+void drawCollisionSpheres(const xpbd::XPBDWorld& world)
+{
+    const bool enabled = world.sphereCollisionsEnabled();
+    const Color fillColor = enabled ? Color{255, 183, 77, 48} : Color{120, 128, 138, 36};
+    const Color wireColor = enabled ? Color{255, 204, 118, 230} : Color{145, 152, 160, 180};
+
+    world.forEachCollisionSphere([fillColor, wireColor](xpbd::Entity, const xpbd::CollisionSphere& sphere) {
+        if (!sphere.enabled) {
+            return;
+        }
+
+        const Vector3 center = toRaylib(sphere.center);
+        DrawSphere(center, sphere.radius, fillColor);
+        DrawSphereWires(center, sphere.radius, 24, 16, wireColor);
+    });
+}
+
+void drawRandomWindowForce(const RandomWindowForceSettings& settings)
+{
+    const float halfWidth = settings.width * 0.5f;
+    const float halfHeight = settings.height * 0.5f;
+    const float halfDepth = settings.depth * 0.5f;
+    const xpbd::Vec3 c = settings.center;
+    const std::array<xpbd::Vec3, 8> corners = {
+        xpbd::Vec3{c.x - halfWidth, c.y - halfHeight, c.z - halfDepth},
+        xpbd::Vec3{c.x + halfWidth, c.y - halfHeight, c.z - halfDepth},
+        xpbd::Vec3{c.x + halfWidth, c.y + halfHeight, c.z - halfDepth},
+        xpbd::Vec3{c.x - halfWidth, c.y + halfHeight, c.z - halfDepth},
+        xpbd::Vec3{c.x - halfWidth, c.y - halfHeight, c.z + halfDepth},
+        xpbd::Vec3{c.x + halfWidth, c.y - halfHeight, c.z + halfDepth},
+        xpbd::Vec3{c.x + halfWidth, c.y + halfHeight, c.z + halfDepth},
+        xpbd::Vec3{c.x - halfWidth, c.y + halfHeight, c.z + halfDepth},
+    };
+
+    const Color color = settings.enabled ? Color{84, 214, 167, 220} : Color{118, 128, 136, 160};
+    const auto drawEdge = [&corners, color](int a, int b) {
+        DrawLine3D(toRaylib(corners[static_cast<std::size_t>(a)]),
+                   toRaylib(corners[static_cast<std::size_t>(b)]),
+                   color);
+    };
+
+    drawEdge(0, 1);
+    drawEdge(1, 2);
+    drawEdge(2, 3);
+    drawEdge(3, 0);
+    drawEdge(4, 5);
+    drawEdge(5, 6);
+    drawEdge(6, 7);
+    drawEdge(7, 4);
+    drawEdge(0, 4);
+    drawEdge(1, 5);
+    drawEdge(2, 6);
+    drawEdge(3, 7);
+
+    const float accelLength = xpbd::length(settings.currentAcceleration);
+    if (accelLength > 1e-5f) {
+        const xpbd::Vec3 direction = settings.currentAcceleration / accelLength;
+        const xpbd::Vec3 arrowEnd = settings.center + direction * 0.55f;
+        DrawLine3D(toRaylib(settings.center), toRaylib(arrowEnd), color);
+        DrawSphereEx(toRaylib(arrowEnd), 0.035f, 8, 8, color);
     }
 }
 
@@ -383,8 +546,16 @@ int main()
     world.setDamping(0.997f);
     world.setSubsteps(4);
     world.setSolverIterations(10);
+    world.setSphereCollisionsEnabled(true);
+    world.setSphereCollisionCompliance(0.0f);
+
+    RandomWindowForceSettings windowForce;
+    world.addIntegrationSystem([&windowForce](xpbd::XPBDWorld& forceWorld, float subDt) {
+        applyRandomWindowForce(forceWorld, windowForce, subDt);
+    });
     world.addIntegrationSystem(xpbd::XPBDWorld::verletIntegrationSystem);
     world.addConstraintSystem(xpbd::XPBDWorld::distanceConstraintSystem);
+    world.addConstraintSystem(xpbd::XPBDWorld::sphereCollisionSystem);
 
     ClothDemo cloth;
     buildCloth(world, cloth);
@@ -407,6 +578,7 @@ int main()
         if (IsKeyPressed(KEY_D)) {
             debugRender = !debugRender;
         }
+        updateRuntimeSettings(world, windowForce);
 
         UpdateCamera(&camera, CAMERA_ORBITAL);
 
@@ -424,6 +596,8 @@ int main()
 
         BeginMode3D(camera);
         DrawGrid(24, 0.25f);
+        drawCollisionSpheres(world);
+        drawRandomWindowForce(windowForce);
         if (debugRender) {
             drawClothDebug(world);
         } else {
@@ -441,14 +615,35 @@ int main()
                       world.simdBackendName(),
                       debugRender ? "debug" : "mesh");
         DrawText(stats, 10, 34, 18, Color{210, 218, 226, 255});
-        char timings[120] = {};
+        char timings[160] = {};
         std::snprintf(timings,
                       sizeof(timings),
-                      "sim: %.2f ms  frame: %.2f ms  %s",
+                      "sim: %.2f ms  frame: %.2f ms  %s  sphere collision: %s",
                       simMs,
                       renderMs,
-                      paused ? "paused" : "running");
+                      paused ? "paused" : "running",
+                      world.sphereCollisionsEnabled() ? "on" : "off");
         DrawText(timings, 10, 56, 18, Color{210, 218, 226, 255});
+        char collisionStats[180] = {};
+        std::snprintf(collisionStats,
+                      sizeof(collisionStats),
+                      "bvh nodes: %zu  broadphase pairs: %zu  contacts: %zu  collision spheres: %zu",
+                      world.sphereCollisionBvhNodeCount(),
+                      world.sphereCollisionBroadphasePairCount(),
+                      world.sphereCollisionContactCount(),
+                      world.collisionSphereCount());
+        DrawText(collisionStats, 10, 78, 18, Color{210, 218, 226, 255});
+        char forceStats[220] = {};
+        std::snprintf(forceStats,
+                      sizeof(forceStats),
+                      "window force: %s  strength: %.1f + %.1f random  size: %.2fx%.2fx%.2f  C/F toggle, arrows/page resize",
+                      windowForce.enabled ? "on" : "off",
+                      windowForce.baseStrength,
+                      windowForce.randomStrength,
+                      windowForce.width,
+                      windowForce.height,
+                      windowForce.depth);
+        DrawText(forceStats, 10, 100, 18, Color{210, 218, 226, 255});
 
         EndDrawing();
         renderMs = (GetTime() - renderStart) * 1000.0;
