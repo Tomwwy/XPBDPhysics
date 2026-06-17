@@ -1,6 +1,6 @@
 #include "xpbd/xpbd_simd.hpp"
 
-#include "xpbd/xpbd_world.hpp"
+#include "xpbd/particle.hpp"
 
 #include <atomic>
 #include <mutex>

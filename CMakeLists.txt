@@ -31,6 +31,9 @@ set_target_properties(raylib PROPERTIES
 )
 
 add_library(xpbd STATIC
+    src/xpbd/systems/distance_constraint_system.cpp
+    src/xpbd/systems/sphere_collision_system.cpp
+    src/xpbd/systems/verlet_integration_system.cpp
     src/xpbd/xpbd_simd.cpp
     src/xpbd/xpbd_world.cpp
 )
