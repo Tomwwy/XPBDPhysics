@@ -38,7 +38,6 @@ void integrateOne(Particle& particle, const Vec3& gravity, float damping, float 
     const Vec3 acceleration = gravity + particle.externalAcceleration;
     particle.position += velocityStep + acceleration * dtSq;
     particle.previousPosition = current;
-    particle.velocity = (particle.position - particle.previousPosition) / dt;
     particle.externalAcceleration = {};
 }
 
@@ -201,7 +200,6 @@ void integrateFourSse2(Particle* particles,
 {
     const __m128 damp = _mm_set1_ps(damping);
     const __m128 dtSq = _mm_set1_ps(dt * dt);
-    const __m128 invDt = _mm_set1_ps(1.0f / dt);
 
     const __m128 px = loadPositionX(particles, index);
     const __m128 py = loadPositionY(particles, index);
@@ -219,19 +217,12 @@ void integrateFourSse2(Particle* particles,
     const __m128 ny = _mm_add_ps(py, _mm_add_ps(vyStep, _mm_mul_ps(ay, dtSq)));
     const __m128 nz = _mm_add_ps(pz, _mm_add_ps(vzStep, _mm_mul_ps(az, dtSq)));
 
-    const __m128 velX = _mm_mul_ps(_mm_sub_ps(nx, px), invDt);
-    const __m128 velY = _mm_mul_ps(_mm_sub_ps(ny, py), invDt);
-    const __m128 velZ = _mm_mul_ps(_mm_sub_ps(nz, pz), invDt);
-
     alignas(16) float oldX[4] = {};
     alignas(16) float oldY[4] = {};
     alignas(16) float oldZ[4] = {};
     alignas(16) float newX[4] = {};
     alignas(16) float newY[4] = {};
     alignas(16) float newZ[4] = {};
-    alignas(16) float outVelX[4] = {};
-    alignas(16) float outVelY[4] = {};
-    alignas(16) float outVelZ[4] = {};
 
     _mm_store_ps(oldX, px);
     _mm_store_ps(oldY, py);
@@ -239,15 +230,11 @@ void integrateFourSse2(Particle* particles,
     _mm_store_ps(newX, nx);
     _mm_store_ps(newY, ny);
     _mm_store_ps(newZ, nz);
-    _mm_store_ps(outVelX, velX);
-    _mm_store_ps(outVelY, velY);
-    _mm_store_ps(outVelZ, velZ);
 
     for (std::size_t lane = 0; lane < 4; ++lane) {
         Particle& particle = particles[index + lane];
         particle.previousPosition = {oldX[lane], oldY[lane], oldZ[lane]};
         particle.position = {newX[lane], newY[lane], newZ[lane]};
-        particle.velocity = {outVelX[lane], outVelY[lane], outVelZ[lane]};
         particle.externalAcceleration = {};
     }
 }

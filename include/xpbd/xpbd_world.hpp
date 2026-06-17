@@ -34,8 +34,9 @@ enum class EntityType : std::uint16_t {
 struct Entity {
     std::uint64_t value = 0;
 
-    static constexpr std::uint64_t kIndexMask = 0xFFFF'FFFFull;
-    static constexpr std::uint64_t kGenerationMask = 0xFFFFull;
+    static constexpr std::uint64_t kIndexMask = 0x0000'0000'FFFF'FFFFull;
+    static constexpr std::uint64_t kGenerationMask = 0x0000'FFFF'0000'0000ull;
+    static constexpr std::uint64_t kTypeMask = 0xFFFF'0000'0000'0000ull;
     static constexpr std::uint32_t kInvalidIndex = std::numeric_limits<std::uint32_t>::max();
 
     constexpr Entity() = default;
@@ -55,12 +56,12 @@ struct Entity {
 
     constexpr std::uint16_t generation() const
     {
-        return static_cast<std::uint16_t>((value >> 32u) & kGenerationMask);
+        return static_cast<std::uint16_t>((value & kGenerationMask) >> 32u);
     }
 
     constexpr EntityType type() const
     {
-        return static_cast<EntityType>(static_cast<std::uint16_t>((value >> 48u) & kGenerationMask));
+        return static_cast<EntityType>(static_cast<std::uint16_t>((value & kTypeMask) >> 48u));
     }
 
     constexpr bool valid() const

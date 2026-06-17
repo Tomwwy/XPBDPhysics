@@ -49,39 +49,27 @@ constexpr float kVoxelEps = 1e-6f;
 inline bool rayBoxEntry(const Vec3& origin, const Vec3& dir,
                         const Vec3& bmin, const Vec3& bmax,
                         float maxDist, float eps, float& tEntry) {
+    constexpr float kParallelDirEps = 1e-12f;
     float tmin = 0.0f;
     float tmax = maxDist;
 
-    // X slab
-    {
-        float invD = 1.0f / dir.x;
-        float t0 = (bmin.x - origin.x) * invD;
-        float t1 = (bmax.x - origin.x) * invD;
+    const auto updateSlab = [&](float o, float d, float mn, float mx) {
+        if (std::abs(d) < kParallelDirEps) {
+            return o >= mn && o <= mx;
+        }
+
+        float invD = 1.0f / d;
+        float t0 = (mn - o) * invD;
+        float t1 = (mx - o) * invD;
         if (invD < 0.0f) std::swap(t0, t1);
         tmin = std::fmaxf(t0, tmin);
         tmax = std::fminf(t1, tmax);
-        if (tmin > tmax + eps) return false;
-    }
-    // Y slab
-    {
-        float invD = 1.0f / dir.y;
-        float t0 = (bmin.y - origin.y) * invD;
-        float t1 = (bmax.y - origin.y) * invD;
-        if (invD < 0.0f) std::swap(t0, t1);
-        tmin = std::fmaxf(t0, tmin);
-        tmax = std::fminf(t1, tmax);
-        if (tmin > tmax + eps) return false;
-    }
-    // Z slab
-    {
-        float invD = 1.0f / dir.z;
-        float t0 = (bmin.z - origin.z) * invD;
-        float t1 = (bmax.z - origin.z) * invD;
-        if (invD < 0.0f) std::swap(t0, t1);
-        tmin = std::fmaxf(t0, tmin);
-        tmax = std::fminf(t1, tmax);
-        if (tmin > tmax + eps) return false;
-    }
+        return tmin <= tmax + eps;
+    };
+
+    if (!updateSlab(origin.x, dir.x, bmin.x, bmax.x)) return false;
+    if (!updateSlab(origin.y, dir.y, bmin.y, bmax.y)) return false;
+    if (!updateSlab(origin.z, dir.z, bmin.z, bmax.z)) return false;
 
     tEntry = tmin >= 0.0f ? tmin : (tmax >= 0.0f ? 0.0f : tmax);
     return tEntry <= maxDist;
