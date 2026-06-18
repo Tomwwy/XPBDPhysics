@@ -593,17 +593,22 @@ private:
     }
 
     void markUpdated(ObjectId id, const AABB& bounds) {
-        if (canUpdateIncrementally(id)) {
-            const int leafIdx = leafForObject_.at(id);
-            nodes_[static_cast<size_t>(leafIdx)].bounds = bounds;
-            if (pendingRefitLeafSet_.insert(leafIdx).second) {
-                pendingRefitLeaves_.push_back(leafIdx);
+        if (!dirty_ && parents_.size() == nodes_.size() &&
+            leafForObject_.size() == objects_.size()) {
+            auto leafIt = leafForObject_.find(id);
+            if (leafIt != leafForObject_.end()) {
+                const int leafIdx = leafIt->second;
+                nodes_[static_cast<size_t>(leafIdx)].bounds = bounds;
+                if (pendingRefitLeafSet_.insert(leafIdx).second) {
+                    pendingRefitLeaves_.push_back(leafIdx);
+                }
+                refitDirty_ = true;
+                mortonOrderDirty_ = true;
+                ++incrementalEditCount_;
+                return;
             }
-            refitDirty_ = true;
-            mortonOrderDirty_ = true;
-        } else {
-            markDirtyForRebuild();
         }
+        markDirtyForRebuild();
     }
 
     void markDirtyForRebuild() {
@@ -617,14 +622,6 @@ private:
         return !dirty_ && !refitDirty_ && !nodes_.empty() &&
                parents_.size() == nodes_.size() &&
                leafForObject_.size() + 1 == objects_.size();
-    }
-
-    bool canUpdateIncrementally(ObjectId id) const {
-        // Pending refits do not block more updates: each update overwrites the
-        // leaf bounds, and one later refit can repair the accumulated ancestors.
-        return !dirty_ && parents_.size() == nodes_.size() &&
-               leafForObject_.size() == objects_.size() &&
-               leafForObject_.find(id) != leafForObject_.end();
     }
 
     void insertLeafIncremental(ObjectId id, const AABB& bounds) {
