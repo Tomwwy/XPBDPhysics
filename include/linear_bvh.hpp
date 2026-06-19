@@ -161,7 +161,6 @@ public:
         refitDirty_ = false;
         incrementalEditCount_ = 0;
         unqueriedInsertCount_ = 0;
-        mortonOrderDirty_ = false;
         lastRebuildRootArea_ = 0.0f;
     }
 
@@ -194,16 +193,6 @@ public:
         return nodes_;
     }
 
-    // Returns 32-bit slot indices in current Morton-code order. Incremental
-    // edits keep the tree queryable but can leave this backing index array out
-    // of order; this accessor repairs the order and relinks leaf slots without
-    // rebuilding tree topology.
-    const std::vector<ObjectIndex>& sortedIndices() const {
-        ensureBuilt();
-        if (mortonOrderDirty_) sortIdsByMortonAndRelinkLeaves();
-        return sortedIds_;
-    }
-
     void rebuild() const {
         nodes_.clear();
         sortedIds_.clear();
@@ -214,7 +203,6 @@ public:
         refitDirty_ = false;
         incrementalEditCount_ = 0;
         unqueriedInsertCount_ = 0;
-        mortonOrderDirty_ = false;
         lastRebuildRootArea_ = 0.0f;
 
         if (objectCount_ == 0) {
@@ -739,7 +727,6 @@ private:
                     pendingRefitLeaves_.push_back(leafIdx);
                 }
                 refitDirty_ = true;
-                mortonOrderDirty_ = true;
                 ++incrementalEditCount_;
                 return;
             }
@@ -795,7 +782,6 @@ private:
             root.bounds = unite(nodes_[static_cast<size_t>(oldRootIdx)].bounds, bounds);
             nodes_[0] = root;
             parents_[0] = -1;
-            mortonOrderDirty_ = true;
             return;
         }
 
@@ -828,7 +814,6 @@ private:
         parents_[static_cast<size_t>(siblingIdx)] = parentIdx;
         parents_[static_cast<size_t>(leafIdx)] = parentIdx;
         refitAncestors(parentIdx);
-        mortonOrderDirty_ = true;
     }
 
     void rebindMovedNode(int nodeIdx) {
@@ -839,113 +824,6 @@ private:
         }
         parents_[static_cast<size_t>(node.left)] = nodeIdx;
         parents_[static_cast<size_t>(node.right)] = nodeIdx;
-    }
-
-    void sortIdsByMortonAndRelinkLeaves() const {
-        if (!mortonOrderDirty_) return;
-        if (objectCount_ == 0) {
-            sortedIds_.clear();
-            mortonOrderDirty_ = false;
-            return;
-        }
-        if (dirty_ || sortedIds_.size() != objectCount_ ||
-            leafForObject_.size() != objects_.size()) {
-            rebuild();
-            return;
-        }
-
-        std::vector<BuildRef> refs;
-        AABB centroidBounds;
-        if (!buildRefsFromSortedIds(refs, centroidBounds)) {
-            rebuild();
-            return;
-        }
-        if (refs.empty()) {
-            mortonOrderDirty_ = false;
-            return;
-        }
-
-        std::sort(refs.begin(), refs.end(), [](const BuildRef& a, const BuildRef& b) {
-            if (a.code != b.code) return a.code < b.code;
-            return a.id < b.id;
-        });
-
-        for (size_t i = 0; i < refs.size(); ++i) {
-            sortedIds_[i] = refs[i].id;
-            if (refs[i].id >= leafForObject_.size() || leafForObject_[refs[i].id] < 0 ||
-                static_cast<size_t>(leafForObject_[refs[i].id]) >= nodes_.size()) {
-                rebuild();
-                return;
-            }
-
-            Node& leaf = nodes_[static_cast<size_t>(leafForObject_[refs[i].id])];
-            if (!leaf.leaf()) {
-                rebuild();
-                return;
-            }
-            leaf.start = i;
-            leaf.end = i + 1;
-        }
-
-        refitAllInternalNodes();
-        mortonOrderDirty_ = false;
-    }
-
-    bool buildRefsFromSortedIds(std::vector<BuildRef>& refs, AABB& centroidBounds) const {
-        refs.clear();
-        refs.reserve(sortedIds_.size());
-
-        bool first = true;
-        for (ObjectIndex id : sortedIds_) {
-            if (id == kInvalidIndex || id >= objects_.size() || !objects_[id].alive) {
-                return false;
-            }
-
-            const Object& obj = objects_[id].object;
-            const Vec3 c = boundsCenter(obj.bounds);
-            if (first) {
-                centroidBounds = {c, c};
-                first = false;
-            } else {
-                centroidBounds.min = vmin(centroidBounds.min, c);
-                centroidBounds.max = vmax(centroidBounds.max, c);
-            }
-            refs.push_back({id, obj.bounds, c, 0});
-        }
-
-        if (first) return true;
-        for (BuildRef& ref : refs) {
-            ref.code = mortonCode(ref.centroid, centroidBounds);
-        }
-        return true;
-    }
-
-    void refitAllInternalNodes() const {
-        if (nodes_.empty()) return;
-
-        static thread_local std::vector<std::pair<int, bool>> stack;
-        prepareScratchStack(stack, nodes_.size());
-        stack.push_back({0, false});
-        while (!stack.empty()) {
-            const auto entry = stack.back();
-            stack.pop_back();
-
-            Node& node = nodes_[static_cast<size_t>(entry.first)];
-            if (node.leaf()) continue;
-
-            if (!entry.second) {
-                stack.push_back({entry.first, true});
-                stack.push_back({node.right, false});
-                stack.push_back({node.left, false});
-                continue;
-            }
-
-            const Node& left = nodes_[static_cast<size_t>(node.left)];
-            const Node& right = nodes_[static_cast<size_t>(node.right)];
-            node.bounds = unite(left.bounds, right.bounds);
-            node.start = std::min(left.start, right.start);
-            node.end = std::max(left.end, right.end);
-        }
     }
 
     int chooseInsertionSibling(const AABB& bounds) const {
@@ -1272,7 +1150,6 @@ private:
     mutable bool refitDirty_ = false;
     mutable size_t incrementalEditCount_ = 0;
     mutable size_t unqueriedInsertCount_ = 0;
-    mutable bool mortonOrderDirty_ = false;
     mutable float lastRebuildRootArea_ = 0.0f;
 
     static constexpr size_t kDeferredInsertBatchThreshold = 64;
