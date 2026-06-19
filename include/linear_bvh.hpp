@@ -1,7 +1,7 @@
 // linear_bvh.hpp -- a Morton-code linear BVH for broadphase comparisons.
 //
 // Self-contained broadphase BVH. Drop this header + utils/ + unordered_dense/
-// into your project and include "linear_bvh.hpp".
+// into your project and compile the src/utils math backend sources.
 //
 // Provides:
 //   - AABB / sphere overlap queries
@@ -273,7 +273,7 @@ public:
             int nodeIdx = stack.back();
             stack.pop_back();
             const Node& node = nodes_[static_cast<size_t>(nodeIdx)];
-            if (!node.bounds.overlaps(region)) continue;
+            if (!boundsOverlap(node.bounds, region)) continue;
 
             if (node.leaf()) {
                 out.push_back(objectIdForIndex(sortedIds_[node.start]));
@@ -605,9 +605,23 @@ private:
         return 2.0f * ((x * y) + (x * z) + (y * z));
     }
 
+    static bool boundsOverlap(const AABB& a, const AABB& b) {
+        return a.max.x >= b.min.x && a.min.x <= b.max.x &&
+               a.max.y >= b.min.y && a.min.y <= b.max.y &&
+               a.max.z >= b.min.z && a.min.z <= b.max.z;
+    }
+
     static bool aabbOverlapsSphere(const AABB& box, const Vec3& center, float radiusSq) {
-        Vec3 nearest = vclamp(center, box.min, box.max);
-        return distanceSq(nearest, center) <= radiusSq + kVoxelEps;
+        const float dx = center.x < box.min.x ? box.min.x - center.x
+                         : center.x > box.max.x ? center.x - box.max.x
+                                                 : 0.0f;
+        const float dy = center.y < box.min.y ? box.min.y - center.y
+                         : center.y > box.max.y ? center.y - box.max.y
+                                                 : 0.0f;
+        const float dz = center.z < box.min.z ? box.min.z - center.z
+                         : center.z > box.max.z ? center.z - box.max.z
+                                                 : 0.0f;
+        return (dx * dx + dy * dy + dz * dz) <= radiusSq + kVoxelEps;
     }
 
     size_t queryReserveHint() const {
@@ -1071,7 +1085,7 @@ private:
 
             const Node& a = nodes_[static_cast<size_t>(entry.first)];
             const Node& b = nodes_[static_cast<size_t>(entry.second)];
-            if (!a.bounds.overlaps(b.bounds)) continue;
+            if (!boundsOverlap(a.bounds, b.bounds)) continue;
 
             if (entry.first == entry.second) {
                 if (a.leaf()) continue;
@@ -1116,7 +1130,7 @@ private:
 
             const Node& a = nodes_[static_cast<size_t>(entry.first)];
             const Node& b = other.nodes_[static_cast<size_t>(entry.second)];
-            if (!a.bounds.overlaps(b.bounds)) continue;
+            if (!boundsOverlap(a.bounds, b.bounds)) continue;
 
             if (a.leaf() && b.leaf()) {
                 appendCrossPair(out, other, sortedIds_[a.start], other.sortedIds_[b.start]);

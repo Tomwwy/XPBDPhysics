@@ -23,6 +23,21 @@ if(NOT EXISTS "${RAYLIB_IMPLIB}")
     message(FATAL_ERROR "raylib import library not found under: ${RAYLIB_IMPLIB}")
 endif()
 
+set(XPBD_UTILS_MATH_SOURCES
+    src/utils/math_dispatch.cpp
+    src/utils/math_scalar.cpp
+)
+
+set(XPBD_X86_SIMD OFF)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64|x86|i[3-6]86")
+    set(XPBD_X86_SIMD ON)
+    list(APPEND XPBD_UTILS_MATH_SOURCES
+        src/utils/math_sse2.cpp
+        src/utils/math_avx.cpp
+        src/utils/math_avx2.cpp
+    )
+endif()
+
 add_library(raylib SHARED IMPORTED GLOBAL)
 set_target_properties(raylib PROPERTIES
     IMPORTED_LOCATION "${RAYLIB_DLL}"
@@ -36,14 +51,28 @@ add_library(xpbd STATIC
     src/xpbd/systems/verlet_integration_system.cpp
     src/xpbd/xpbd_simd.cpp
     src/xpbd/xpbd_world.cpp
+    ${XPBD_UTILS_MATH_SOURCES}
 )
 
 target_include_directories(xpbd PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
+if(XPBD_X86_SIMD)
+    target_compile_definitions(xpbd PRIVATE UTILS_HAS_X86_SIMD=1)
+endif()
+
 if(MSVC)
     target_compile_options(xpbd PRIVATE /W4)
+    if(XPBD_X86_SIMD)
+        set_source_files_properties(src/utils/math_avx.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX")
+        set_source_files_properties(src/utils/math_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+    endif()
 else()
     target_compile_options(xpbd PRIVATE -Wall -Wextra -Wpedantic)
+    if(XPBD_X86_SIMD)
+        set_source_files_properties(src/utils/math_sse2.cpp PROPERTIES COMPILE_OPTIONS "-msse2")
+        set_source_files_properties(src/utils/math_avx.cpp PROPERTIES COMPILE_OPTIONS "-mavx")
+        set_source_files_properties(src/utils/math_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2")
+    endif()
 endif()
 
 add_executable(xpbd_physics main.cpp)

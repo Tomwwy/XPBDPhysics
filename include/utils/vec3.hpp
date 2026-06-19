@@ -61,6 +61,51 @@ inline constexpr Vec3 operator*(float scalar, const Vec3& value)
     return value * scalar;
 }
 
+enum class SimdLevel {
+    Scalar,
+    SSE2,
+    AVX,
+    AVX2,
+};
+
+struct SimdSupport {
+    bool sse2 = false;
+    bool sse41 = false;
+    bool avx = false;
+    bool avx2 = false;
+    SimdLevel active = SimdLevel::Scalar;
+};
+
+void initializeSimd();
+SimdSupport simdSupport();
+SimdLevel activeSimdLevel();
+const char* simdLevelName(SimdLevel level);
+
+namespace detail {
+
+// Keep the public Vec3 helpers below inline. xpbd::Vec3 aliases this type, so
+// routing dot/length/cross through runtime dispatch makes the solver's tiny hot
+// math calls indirect and can cost more than SIMD saves. The dispatch table is
+// intended for coarser BVH helpers such as AABB overlap and ray-box tests.
+struct MathOps {
+    float (*dot)(const Vec3&, const Vec3&);
+    Vec3 (*cross)(const Vec3&, const Vec3&);
+    float (*lengthSq)(const Vec3&);
+    float (*distanceSq)(const Vec3&, const Vec3&);
+    Vec3 (*vmin)(const Vec3&, const Vec3&);
+    Vec3 (*vmax)(const Vec3&, const Vec3&);
+    Vec3 (*vclamp)(const Vec3&, const Vec3&, const Vec3&);
+    float (*maxComponent)(const Vec3&);
+    bool (*aabbOverlaps)(const Vec3&, const Vec3&, const Vec3&, const Vec3&);
+    bool (*aabbContains)(const Vec3&, const Vec3&, const Vec3&);
+    bool (*rayBoxEntry)(const Vec3&, const Vec3&, const Vec3&, const Vec3&,
+                        float, float, float&);
+};
+
+const MathOps& mathOps();
+
+}  // namespace detail
+
 inline float dot(const Vec3& lhs, const Vec3& rhs)
 {
     return lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z;

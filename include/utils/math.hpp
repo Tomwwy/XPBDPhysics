@@ -1,8 +1,7 @@
 // utils/math.hpp -- standalone 3D math for LinearBVH broadphase.
 //
-// Slimmed from the full MLSH math.hpp: no SIMD dispatch, no Int3 / voxel
-// helpers, just the Vec3 / AABB types and ray-geometry functions that
-// LinearBVH needs for broadphase queries and narrowphase raycast fallback.
+// Slimmed from the full MLSH math.hpp: inline Vec3 math plus SIMD-dispatched
+// AABB/ray-box helpers, with no Int3 / voxel helpers.
 #ifndef UTILS_MATH_HPP
 #define UTILS_MATH_HPP
 
@@ -29,14 +28,10 @@ struct AABB {
     Vec3 extent() const { return max - min; }
 
     bool overlaps(const AABB& o) const {
-        return max.x >= o.min.x && min.x <= o.max.x &&
-               max.y >= o.min.y && min.y <= o.max.y &&
-               max.z >= o.min.z && min.z <= o.max.z;
+        return detail::mathOps().aabbOverlaps(min, max, o.min, o.max);
     }
     bool contains(const Vec3& p) const {
-        return p.x >= min.x && p.x <= max.x &&
-               p.y >= min.y && p.y <= max.y &&
-               p.z >= min.z && p.z <= max.z;
+        return detail::mathOps().aabbContains(min, max, p);
     }
 };
 
@@ -49,30 +44,7 @@ constexpr float kVoxelEps = 1e-6f;
 inline bool rayBoxEntry(const Vec3& origin, const Vec3& dir,
                         const Vec3& bmin, const Vec3& bmax,
                         float maxDist, float eps, float& tEntry) {
-    constexpr float kParallelDirEps = 1e-12f;
-    float tmin = 0.0f;
-    float tmax = maxDist;
-
-    const auto updateSlab = [&](float o, float d, float mn, float mx) {
-        if (std::abs(d) < kParallelDirEps) {
-            return o >= mn && o <= mx;
-        }
-
-        float invD = 1.0f / d;
-        float t0 = (mn - o) * invD;
-        float t1 = (mx - o) * invD;
-        if (invD < 0.0f) std::swap(t0, t1);
-        tmin = std::fmaxf(t0, tmin);
-        tmax = std::fminf(t1, tmax);
-        return tmin <= tmax + eps;
-    };
-
-    if (!updateSlab(origin.x, dir.x, bmin.x, bmax.x)) return false;
-    if (!updateSlab(origin.y, dir.y, bmin.y, bmax.y)) return false;
-    if (!updateSlab(origin.z, dir.z, bmin.z, bmax.z)) return false;
-
-    tEntry = tmin >= 0.0f ? tmin : (tmax >= 0.0f ? 0.0f : tmax);
-    return tEntry <= maxDist;
+    return detail::mathOps().rayBoxEntry(origin, dir, bmin, bmax, maxDist, eps, tEntry);
 }
 
 // --- Exact ray-geometry narrowphase tests -----------------------------------
