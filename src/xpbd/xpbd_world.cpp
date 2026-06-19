@@ -147,7 +147,7 @@ void XPBDWorld::clearEntities()
     collisionSpheres_.destroyAll();
     for (detail::SphereCollisionLayerTree& layer : sphereCollisionLayers_) {
         layer.broadphase.clear();
-        layer.refsByObject = {{}};
+        layer.refsByObject.clear();
         layer.objectByEntity.clear();
         layer.aggregateCollisionMask = 0u;
         layer.active = false;

@@ -125,20 +125,20 @@ void resetLayerSyncState(detail::SphereCollisionLayerTree& layer, CollisionLayer
 
 void removeStaleRefs(detail::SphereCollisionLayerTree& layer, std::uint64_t stamp)
 {
-    for (std::size_t objectIndex = 1u; objectIndex < layer.refsByObject.size(); ++objectIndex) {
+    for (std::size_t objectIndex = 0u; objectIndex < layer.refsByObject.size(); ++objectIndex) {
         detail::SphereCollisionBroadphaseRef& ref = layer.refsByObject[objectIndex];
         if (!ref.registered || ref.lastSeenStamp == stamp) {
             continue;
         }
 
         layer.objectByEntity.erase(ref.entity.value);
-        layer.broadphase.remove(static_cast<utils::LinearBVH::ObjectId>(objectIndex));
+        layer.broadphase.remove(ref.objectId);
         ref = {};
     }
 
     if (layer.broadphase.objectCount() == 0u) {
         layer.broadphase.clear();
-        layer.refsByObject = {{}};
+        layer.refsByObject.clear();
         layer.objectByEntity.clear();
         layer.aggregateCollisionMask = 0u;
         layer.active = false;
@@ -191,8 +191,11 @@ void XPBDWorld::sphereCollisionSystem(XPBDWorld& world, float dt)
                 if (!layer.broadphase.updateSphere(id, center, radius)) {
                     layer.broadphase.remove(id);
                     layer.objectByEntity.erase(objectIt);
-                    if (static_cast<std::size_t>(id) < layer.refsByObject.size()) {
-                        layer.refsByObject[static_cast<std::size_t>(id)] = {};
+                    const utils::LinearBVH::ObjectIndex objectIndex = utils::LinearBVH::indexOf(id);
+                    if (objectIndex != utils::LinearBVH::kInvalidIndex &&
+                        static_cast<std::size_t>(objectIndex) < layer.refsByObject.size() &&
+                        layer.refsByObject[objectIndex].objectId == id) {
+                        layer.refsByObject[objectIndex] = {};
                     }
                     id = utils::LinearBVH::kInvalid;
                 }
@@ -209,12 +212,19 @@ void XPBDWorld::sphereCollisionSystem(XPBDWorld& world, float dt)
                 return;
             }
 
-            if (layer.refsByObject.size() <= id) {
-                layer.refsByObject.resize(static_cast<std::size_t>(id) + 1u);
+            const utils::LinearBVH::ObjectIndex objectIndex = utils::LinearBVH::indexOf(id);
+            if (objectIndex == utils::LinearBVH::kInvalidIndex) {
+                return;
             }
 
-            detail::SphereCollisionBroadphaseRef& ref = layer.refsByObject[static_cast<std::size_t>(id)];
+            if (layer.refsByObject.size() <= objectIndex) {
+                layer.refsByObject.resize(static_cast<std::size_t>(objectIndex) + 1u);
+            }
+
+            detail::SphereCollisionBroadphaseRef& ref =
+                layer.refsByObject[static_cast<std::size_t>(objectIndex)];
             ref.entity = entity;
+            ref.objectId = id;
             ref.particle = particle;
             ref.collisionLayer = collisionLayer;
             ref.collisionMask = collisionMask;
@@ -276,7 +286,7 @@ void XPBDWorld::sphereCollisionSystem(XPBDWorld& world, float dt)
         return;
     }
 
-    std::vector<std::pair<utils::LinearBVH::ObjectId, utils::LinearBVH::ObjectId>> pairs;
+    std::vector<std::pair<utils::LinearBVH::ObjectIndex, utils::LinearBVH::ObjectIndex>> pairs;
     std::unordered_set<EntityPairKey, EntityPairKeyHash> solvedPairs;
 
     const float alpha = world.sphereCollisionCompliance_ / (dt * dt);
@@ -356,14 +366,20 @@ void XPBDWorld::sphereCollisionSystem(XPBDWorld& world, float dt)
         solvedPairs.reserve(solvedPairs.size() + pairs.size());
 
         for (const auto& pair : pairs) {
-            if (pair.first >= layerA.refsByObject.size() || pair.second >= layerB.refsByObject.size()) {
+            const std::size_t objectIndexA = static_cast<std::size_t>(pair.first);
+            const std::size_t objectIndexB = static_cast<std::size_t>(pair.second);
+            if (objectIndexA >= layerA.refsByObject.size() ||
+                objectIndexB >= layerB.refsByObject.size()) {
                 continue;
             }
 
             const detail::SphereCollisionBroadphaseRef& refA =
-                layerA.refsByObject[static_cast<std::size_t>(pair.first)];
+                layerA.refsByObject[objectIndexA];
             const detail::SphereCollisionBroadphaseRef& refB =
-                layerB.refsByObject[static_cast<std::size_t>(pair.second)];
+                layerB.refsByObject[objectIndexB];
+            if (!refA.registered || !refB.registered) {
+                continue;
+            }
             solvePair(refA, refB);
         }
     };

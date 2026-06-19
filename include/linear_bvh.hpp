@@ -32,14 +32,14 @@
 namespace utils {
 
 class LinearBVH {
-    template <typename Key, typename Value>
-    using DenseMap = ankerl::unordered_dense::map<Key, Value>;
     template <typename Key>
     using DenseSet = ankerl::unordered_dense::set<Key>;
 
 public:
     using ObjectId = uint64_t;
+    using ObjectIndex = uint32_t;
     static constexpr ObjectId kInvalid = 0;
+    static constexpr ObjectIndex kInvalidIndex = std::numeric_limits<ObjectIndex>::max();
 
     struct Node {
         AABB bounds;
@@ -92,27 +92,35 @@ public:
     }
 
     void remove(ObjectId id) {
-        if (objects_.erase(id) != 0) {
-            dirty_ = true;
-            refitDirty_ = false;
-            pendingRefitLeaves_.clear();
-            pendingRefitLeafSet_.clear();
-        }
+        ObjectIndex index = kInvalidIndex;
+        ObjectSlot* slot = slotFor(id, &index);
+        if (slot == nullptr) return;
+
+        slot->object = Object{};
+        slot->alive = false;
+        slot->generation = nextGeneration(slot->generation);
+        if (index < leafForObject_.size()) leafForObject_[index] = -1;
+        freeList_.push_back(index);
+        --objectCount_;
+        dirty_ = true;
+        refitDirty_ = false;
+        pendingRefitLeaves_.clear();
+        pendingRefitLeafSet_.clear();
     }
 
     // Borrowed update: `collider` must outlive the BVH registration.
     bool update(ObjectId id, const Collider& collider) {
-        auto it = objects_.find(id);
-        if (it == objects_.end()) return false;
+        ObjectIndex index = kInvalidIndex;
+        ObjectSlot* slot = slotFor(id, &index);
+        if (slot == nullptr) return false;
 
         AABB b;
         if (!prepareCollider(collider, b)) return false;
 
-        Object replacement;
-        replacement.collider = &collider;
-        replacement.bounds = b;
-        it->second = std::move(replacement);
-        markUpdated(id, b);
+        slot->object.owned.reset();
+        slot->object.collider = &collider;
+        slot->object.bounds = b;
+        markUpdated(index, b);
         return true;
     }
 
@@ -140,8 +148,11 @@ public:
 
     void clear() {
         objects_.clear();
+        freeList_.clear();
+        objectCount_ = 0;
         nodes_.clear();
         sortedIds_.clear();
+        sortedObjectIds_.clear();
         parents_.clear();
         leafForObject_.clear();
         pendingRefitLeaves_.clear();
@@ -152,14 +163,26 @@ public:
         unqueriedInsertCount_ = 0;
         mortonOrderDirty_ = false;
         lastRebuildRootArea_ = 0.0f;
-        nextId_ = 1;
     }
 
-    size_t objectCount() const { return objects_.size(); }
-    bool contains(ObjectId id) const { return objects_.count(id) != 0; }
-    const Collider& collider(ObjectId id) const { return *objects_.at(id).collider; }
-    AABB bounds(ObjectId id) const { return objects_.at(id).bounds; }
+    size_t objectCount() const { return objectCount_; }
+    bool contains(ObjectId id) const { return objectFor(id) != nullptr; }
+    const Collider& collider(ObjectId id) const { return *checkedObject(id).collider; }
+    AABB bounds(ObjectId id) const { return checkedObject(id).bounds; }
     bool dirty() const { return dirty_ || refitDirty_; }
+
+    static constexpr ObjectIndex indexOf(ObjectId id) {
+        return id == kInvalid ? kInvalidIndex
+                              : static_cast<ObjectIndex>(id & UINT64_C(0xffffffff));
+    }
+
+    static constexpr uint32_t generationOf(ObjectId id) {
+        return static_cast<uint32_t>(id >> 32u);
+    }
+
+    ObjectId idForIndex(ObjectIndex index) const {
+        return objectIdForIndex(index);
+    }
 
     size_t nodeCount() const {
         ensureBuilt();
@@ -171,20 +194,31 @@ public:
         return nodes_;
     }
 
-    // Returns IDs in current Morton-code order. Incremental edits keep the tree
-    // queryable but can leave this backing ID array out of order; this accessor
-    // repairs the order and relinks leaf slots without rebuilding tree topology.
-    const std::vector<ObjectId>& sortedIds() const {
+    // Returns 32-bit slot indices in current Morton-code order. Incremental
+    // edits keep the tree queryable but can leave this backing index array out
+    // of order; this accessor repairs the order and relinks leaf slots without
+    // rebuilding tree topology.
+    const std::vector<ObjectIndex>& sortedIndices() const {
         ensureBuilt();
         if (mortonOrderDirty_) sortIdsByMortonAndRelinkLeaves();
         return sortedIds_;
+    }
+
+    const std::vector<ObjectId>& sortedIds() const {
+        const std::vector<ObjectIndex>& indices = sortedIndices();
+        sortedObjectIds_.clear();
+        sortedObjectIds_.reserve(indices.size());
+        for (ObjectIndex index : indices) {
+            sortedObjectIds_.push_back(objectIdForIndex(index));
+        }
+        return sortedObjectIds_;
     }
 
     void rebuild() const {
         nodes_.clear();
         sortedIds_.clear();
         parents_.clear();
-        leafForObject_.clear();
+        leafForObject_.assign(objects_.size(), -1);
         pendingRefitLeaves_.clear();
         pendingRefitLeafSet_.clear();
         refitDirty_ = false;
@@ -193,21 +227,24 @@ public:
         mortonOrderDirty_ = false;
         lastRebuildRootArea_ = 0.0f;
 
-        if (objects_.empty()) {
+        if (objectCount_ == 0) {
             dirty_ = false;
             return;
         }
-        if (objects_.size() > static_cast<size_t>(std::numeric_limits<int>::max() / 2)) {
+        if (objectCount_ > static_cast<size_t>(std::numeric_limits<int>::max() / 2)) {
             throw std::length_error("LinearBVH: too many objects for int node indices");
         }
 
         std::vector<BuildRef> refs;
-        refs.reserve(objects_.size());
+        refs.reserve(objectCount_);
 
         AABB centroidBounds;
         bool first = true;
-        for (const auto& kv : objects_) {
-            const Object& obj = kv.second;
+        for (ObjectIndex index = 0; index < objects_.size(); ++index) {
+            const ObjectSlot& slot = objects_[index];
+            if (!slot.alive) continue;
+
+            const Object& obj = slot.object;
             const Vec3 c = boundsCenter(obj.bounds);
             if (first) {
                 centroidBounds = {c, c};
@@ -216,7 +253,7 @@ public:
                 centroidBounds.min = vmin(centroidBounds.min, c);
                 centroidBounds.max = vmax(centroidBounds.max, c);
             }
-            refs.push_back({kv.first, obj.bounds, c, 0});
+            refs.push_back({index, obj.bounds, c, 0});
         }
 
         for (BuildRef& ref : refs) ref.code = mortonCode(ref.centroid, centroidBounds);
@@ -246,7 +283,7 @@ public:
 
     void queryAABB(const AABB& region, std::vector<ObjectId>& out) const {
         out.clear();
-        if (objects_.empty() || !validQueryBounds(region)) return;
+        if (objectCount_ == 0 || !validQueryBounds(region)) return;
 
         ensureBuilt();
         reserveQueryOutput(out);
@@ -262,7 +299,7 @@ public:
             if (!node.bounds.overlaps(region)) continue;
 
             if (node.leaf()) {
-                out.push_back(sortedIds_[node.start]);
+                out.push_back(objectIdForIndex(sortedIds_[node.start]));
             } else {
                 stack.push_back(node.right);
                 stack.push_back(node.left);
@@ -278,7 +315,7 @@ public:
 
     void querySphere(const Vec3& center, float radius, std::vector<ObjectId>& out) const {
         out.clear();
-        if (objects_.empty() || radius < 0.0f) return;
+        if (objectCount_ == 0 || radius < 0.0f) return;
 
         ensureBuilt();
         reserveQueryOutput(out);
@@ -295,7 +332,7 @@ public:
             if (!aabbOverlapsSphere(node.bounds, center, radiusSq)) continue;
 
             if (node.leaf()) {
-                out.push_back(sortedIds_[node.start]);
+                out.push_back(objectIdForIndex(sortedIds_[node.start]));
             } else {
                 stack.push_back(node.right);
                 stack.push_back(node.left);
@@ -303,46 +340,71 @@ public:
         }
     }
 
-    std::vector<std::pair<ObjectId, ObjectId>> overlapPairs() const {
-        std::vector<std::pair<ObjectId, ObjectId>> out;
+    std::vector<std::pair<ObjectIndex, ObjectIndex>> overlapPairs() const {
+        std::vector<std::pair<ObjectIndex, ObjectIndex>> out;
         overlapPairs(out);
         return out;
     }
 
-    void overlapPairs(std::vector<std::pair<ObjectId, ObjectId>>& out) const {
+    void overlapPairs(std::vector<std::pair<ObjectIndex, ObjectIndex>>& out) const {
         out.clear();
-        if (objects_.size() < 2) return;
+        if (objectCount_ < 2) return;
 
         ensureBuilt();
         reservePairOutput(out);
         collectPairs(0, 0, out);
     }
 
-    std::vector<std::pair<ObjectId, ObjectId>> overlapPairs(const LinearBVH& other) const {
-        std::vector<std::pair<ObjectId, ObjectId>> out;
+    void overlapPairs(std::vector<std::pair<ObjectId, ObjectId>>& out) const {
+        out.clear();
+        if (objectCount_ < 2) return;
+
+        std::vector<std::pair<ObjectIndex, ObjectIndex>> indexPairs;
+        overlapPairs(indexPairs);
+        out.reserve(indexPairs.size());
+        for (const auto& pair : indexPairs) {
+            out.emplace_back(objectIdForIndex(pair.first), objectIdForIndex(pair.second));
+        }
+    }
+
+    std::vector<std::pair<ObjectIndex, ObjectIndex>> overlapPairs(const LinearBVH& other) const {
+        std::vector<std::pair<ObjectIndex, ObjectIndex>> out;
         overlapPairs(other, out);
         return out;
     }
 
     void overlapPairs(const LinearBVH& other,
-                      std::vector<std::pair<ObjectId, ObjectId>>& out) const {
+                      std::vector<std::pair<ObjectIndex, ObjectIndex>>& out) const {
         out.clear();
         if (&other == this) {
             overlapPairs(out);
             return;
         }
-        if (objects_.empty() || other.objects_.empty()) return;
+        if (objectCount_ == 0 || other.objectCount_ == 0) return;
 
         ensureBuilt();
         other.ensureBuilt();
-        reservePairOutput(out, other.objects_.size());
+        reservePairOutput(out, other.objectCount_);
         collectPairsWith(0, other, 0, out);
+    }
+
+    void overlapPairs(const LinearBVH& other,
+                      std::vector<std::pair<ObjectId, ObjectId>>& out) const {
+        out.clear();
+        if (objectCount_ == 0 || other.objectCount_ == 0) return;
+
+        std::vector<std::pair<ObjectIndex, ObjectIndex>> indexPairs;
+        overlapPairs(other, indexPairs);
+        out.reserve(indexPairs.size());
+        for (const auto& pair : indexPairs) {
+            out.emplace_back(objectIdForIndex(pair.first), other.objectIdForIndex(pair.second));
+        }
     }
 
     RayHit raycast(const Vec3& origin, const Vec3& dir, float maxDist = 1e6f) const {
         RayHit best;
         best.t = maxDist;
-        if (objects_.empty() || maxDist < 0.0f) return RayHit{};
+        if (objectCount_ == 0 || maxDist < 0.0f) return RayHit{};
 
         Vec3 d = dir;
         const float dlen = length(d);
@@ -363,13 +425,13 @@ public:
 
             const Node& node = nodes_[static_cast<size_t>(entry.node)];
             if (node.leaf()) {
-                const ObjectId id = sortedIds_[node.start];
-                const Object& obj = objects_.at(id);
+                const ObjectIndex index = sortedIds_[node.start];
+                const Object& obj = objects_[index].object;
                 float t = 0.0f;
                 if (obj.collider->raycast(origin, d, best.t, t) &&
                     (!best.hit || t < best.t)) {
                     best.hit = true;
-                    best.id = id;
+                    best.id = objectIdForIndex(index);
                     best.t = t;
                 }
                 continue;
@@ -407,8 +469,14 @@ private:
         AABB bounds;
     };
 
+    struct ObjectSlot {
+        Object object;
+        uint32_t generation = 1;
+        bool alive = false;
+    };
+
     struct BuildRef {
-        ObjectId id = kInvalid;
+        ObjectIndex id = kInvalidIndex;
         AABB bounds;
         Vec3 centroid;
         uint64_t code = 0;
@@ -431,33 +499,97 @@ private:
     }
 
     bool updateOwned(ObjectId id, std::unique_ptr<Collider> c) {
-        auto it = objects_.find(id);
-        if (it == objects_.end()) return false;
+        ObjectIndex index = kInvalidIndex;
+        ObjectSlot* slot = slotFor(id, &index);
+        if (slot == nullptr) return false;
 
         AABB b;
         if (!prepareCollider(*c, b)) return false;
 
-        Object replacement;
-        replacement.owned = std::move(c);
-        replacement.collider = replacement.owned.get();
-        replacement.bounds = b;
-        it->second = std::move(replacement);
-        markUpdated(id, b);
+        slot->object.owned = std::move(c);
+        slot->object.collider = slot->object.owned.get();
+        slot->object.bounds = b;
+        markUpdated(index, b);
         return true;
     }
 
     ObjectId commitObject(Object obj) {
-        if (nextId_ == kInvalid) {
-            throw std::length_error("LinearBVH: ObjectId space exhausted");
+        ObjectIndex index = kInvalidIndex;
+        if (!freeList_.empty()) {
+            index = freeList_.back();
+            freeList_.pop_back();
+        } else {
+            if (objects_.size() >= static_cast<size_t>(kInvalidIndex)) {
+                throw std::length_error("LinearBVH: ObjectId index space exhausted");
+            }
+            index = static_cast<ObjectIndex>(objects_.size());
+            objects_.push_back(ObjectSlot{});
+            leafForObject_.push_back(-1);
         }
-        const ObjectId id = nextId_;
-        auto result = objects_.emplace(id, std::move(obj));
-        if (!result.second) {
-            throw std::logic_error("LinearBVH: duplicate ObjectId allocation");
+
+        ObjectSlot& slot = objects_[index];
+        if (slot.generation == 0u) {
+            slot.generation = 1u;
         }
-        ++nextId_;
-        markInserted(id, result.first->second.bounds);
-        return id;
+        slot.object = std::move(obj);
+        slot.alive = true;
+        if (index >= leafForObject_.size()) leafForObject_.resize(static_cast<size_t>(index) + 1u, -1);
+        leafForObject_[index] = -1;
+        ++objectCount_;
+
+        markInserted(index, slot.object.bounds);
+        return makeObjectId(index, slot.generation);
+    }
+
+    static constexpr ObjectId makeObjectId(ObjectIndex index, uint32_t generation) {
+        return (static_cast<ObjectId>(generation) << 32u) | static_cast<ObjectId>(index);
+    }
+
+    static uint32_t nextGeneration(uint32_t generation) {
+        ++generation;
+        return generation == 0u ? 1u : generation;
+    }
+
+    ObjectSlot* slotFor(ObjectId id, ObjectIndex* outIndex = nullptr) {
+        const ObjectIndex index = indexOf(id);
+        if (outIndex != nullptr) *outIndex = index;
+        if (index == kInvalidIndex || index >= objects_.size()) return nullptr;
+
+        ObjectSlot& slot = objects_[index];
+        return slot.alive && slot.generation == generationOf(id) ? &slot : nullptr;
+    }
+
+    const ObjectSlot* slotFor(ObjectId id, ObjectIndex* outIndex = nullptr) const {
+        const ObjectIndex index = indexOf(id);
+        if (outIndex != nullptr) *outIndex = index;
+        if (index == kInvalidIndex || index >= objects_.size()) return nullptr;
+
+        const ObjectSlot& slot = objects_[index];
+        return slot.alive && slot.generation == generationOf(id) ? &slot : nullptr;
+    }
+
+    Object* objectFor(ObjectId id, ObjectIndex* outIndex = nullptr) {
+        ObjectSlot* slot = slotFor(id, outIndex);
+        return slot != nullptr ? &slot->object : nullptr;
+    }
+
+    const Object* objectFor(ObjectId id, ObjectIndex* outIndex = nullptr) const {
+        const ObjectSlot* slot = slotFor(id, outIndex);
+        return slot != nullptr ? &slot->object : nullptr;
+    }
+
+    const Object& checkedObject(ObjectId id) const {
+        const Object* object = objectFor(id);
+        if (object == nullptr) {
+            throw std::out_of_range("LinearBVH: invalid ObjectId");
+        }
+        return *object;
+    }
+
+    ObjectId objectIdForIndex(ObjectIndex index) const {
+        if (index == kInvalidIndex || index >= objects_.size()) return kInvalid;
+        const ObjectSlot& slot = objects_[index];
+        return slot.alive ? makeObjectId(index, slot.generation) : kInvalid;
     }
 
     static bool prepareCollider(const Collider& collider, AABB& bounds) {
@@ -504,7 +636,7 @@ private:
     }
 
     size_t queryReserveHint() const {
-        return std::min(objects_.size(), std::max<size_t>(size_t{8}, objects_.size() / 64));
+        return std::min(objectCount_, std::max<size_t>(size_t{8}, objectCount_ / 64));
     }
 
     void reserveQueryOutput(std::vector<ObjectId>& out) const {
@@ -512,14 +644,16 @@ private:
         if (out.capacity() < hint) out.reserve(hint);
     }
 
-    void reservePairOutput(std::vector<std::pair<ObjectId, ObjectId>>& out) const {
-        const size_t hint = std::min(objects_.size(), std::max<size_t>(size_t{16}, objects_.size() / 8));
+    template <typename Id>
+    void reservePairOutput(std::vector<std::pair<Id, Id>>& out) const {
+        const size_t hint = std::min(objectCount_, std::max<size_t>(size_t{16}, objectCount_ / 8));
         if (out.capacity() < hint) out.reserve(hint);
     }
 
-    void reservePairOutput(std::vector<std::pair<ObjectId, ObjectId>>& out,
+    template <typename Id>
+    void reservePairOutput(std::vector<std::pair<Id, Id>>& out,
                            size_t otherObjectCount) const {
-        const size_t smaller = std::min(objects_.size(), otherObjectCount);
+        const size_t smaller = std::min(objectCount_, otherObjectCount);
         const size_t hint = std::min(smaller * 4u, std::max<size_t>(size_t{16}, smaller / 4u));
         if (out.capacity() < hint) out.reserve(hint);
     }
@@ -571,7 +705,7 @@ private:
         return nodeIdx;
     }
 
-    void markInserted(ObjectId id, const AABB& bounds) {
+    void markInserted(ObjectIndex id, const AABB& bounds) {
         ++unqueriedInsertCount_;
         if (!dirty_ && shouldDeferUnqueriedInserts()) {
             markDirtyForRebuild();
@@ -592,12 +726,13 @@ private:
         }
     }
 
-    void markUpdated(ObjectId id, const AABB& bounds) {
+    void markUpdated(ObjectIndex id, const AABB& bounds) {
         if (!dirty_ && parents_.size() == nodes_.size() &&
-            leafForObject_.size() == objects_.size()) {
-            auto leafIt = leafForObject_.find(id);
-            if (leafIt != leafForObject_.end()) {
-                const int leafIdx = leafIt->second;
+            sortedIds_.size() == objectCount_ &&
+            leafForObject_.size() == objects_.size() &&
+            id < leafForObject_.size()) {
+            const int leafIdx = leafForObject_[id];
+            if (leafIdx >= 0 && static_cast<size_t>(leafIdx) < nodes_.size()) {
                 nodes_[static_cast<size_t>(leafIdx)].bounds = bounds;
                 if (pendingRefitLeafSet_.insert(leafIdx).second) {
                     pendingRefitLeaves_.push_back(leafIdx);
@@ -621,10 +756,11 @@ private:
     bool canInsertIncrementally() const {
         return !dirty_ && !refitDirty_ && !nodes_.empty() &&
                parents_.size() == nodes_.size() &&
-               leafForObject_.size() + 1 == objects_.size();
+               leafForObject_.size() == objects_.size() &&
+               sortedIds_.size() + 1 == objectCount_;
     }
 
-    void insertLeafIncremental(ObjectId id, const AABB& bounds) {
+    void insertLeafIncremental(ObjectIndex id, const AABB& bounds) {
         if (nodes_.size() > static_cast<size_t>(std::numeric_limits<int>::max() - 2)) {
             markDirtyForRebuild();
             return;
@@ -706,12 +842,12 @@ private:
 
     void sortIdsByMortonAndRelinkLeaves() const {
         if (!mortonOrderDirty_) return;
-        if (objects_.empty()) {
+        if (objectCount_ == 0) {
             sortedIds_.clear();
             mortonOrderDirty_ = false;
             return;
         }
-        if (dirty_ || sortedIds_.size() != objects_.size() ||
+        if (dirty_ || sortedIds_.size() != objectCount_ ||
             leafForObject_.size() != objects_.size()) {
             rebuild();
             return;
@@ -725,14 +861,14 @@ private:
 
         std::vector<BuildRef> refs;
         refs.reserve(sortedIds_.size());
-        for (ObjectId id : sortedIds_) {
-            auto objIt = objects_.find(id);
-            if (objIt == objects_.end()) {
+        for (ObjectIndex id : sortedIds_) {
+            if (id == kInvalidIndex || id >= objects_.size() || !objects_[id].alive) {
                 rebuild();
                 return;
             }
-            const Vec3 centroid = boundsCenter(objIt->second.bounds);
-            refs.push_back({id, objIt->second.bounds, centroid,
+            const Object& obj = objects_[id].object;
+            const Vec3 centroid = boundsCenter(obj.bounds);
+            refs.push_back({id, obj.bounds, centroid,
                             mortonCode(centroid, centroidBounds)});
         }
         std::sort(refs.begin(), refs.end(), [](const BuildRef& a, const BuildRef& b) {
@@ -742,14 +878,13 @@ private:
 
         for (size_t i = 0; i < refs.size(); ++i) {
             sortedIds_[i] = refs[i].id;
-            auto leafIt = leafForObject_.find(refs[i].id);
-            if (leafIt == leafForObject_.end() || leafIt->second < 0 ||
-                static_cast<size_t>(leafIt->second) >= nodes_.size()) {
+            if (refs[i].id >= leafForObject_.size() || leafForObject_[refs[i].id] < 0 ||
+                static_cast<size_t>(leafForObject_[refs[i].id]) >= nodes_.size()) {
                 rebuild();
                 return;
             }
 
-            Node& leaf = nodes_[static_cast<size_t>(leafIt->second)];
+            Node& leaf = nodes_[static_cast<size_t>(leafForObject_[refs[i].id])];
             if (!leaf.leaf()) {
                 rebuild();
                 return;
@@ -764,8 +899,10 @@ private:
 
     bool computeCentroidBounds(AABB& centroidBounds) const {
         bool first = true;
-        for (const auto& kv : objects_) {
-            const Vec3 c = boundsCenter(kv.second.bounds);
+        for (const ObjectSlot& slot : objects_) {
+            if (!slot.alive) continue;
+
+            const Vec3 c = boundsCenter(slot.object.bounds);
             if (first) {
                 centroidBounds = {c, c};
                 first = false;
@@ -857,7 +994,7 @@ private:
     }
 
     bool shouldRebuildAfterIncrementalEdits() const {
-        if (objects_.empty() || nodes_.empty()) return false;
+        if (objectCount_ == 0 || nodes_.empty()) return false;
 
         if (shouldRebuildForEditCount()) return true;
 
@@ -867,13 +1004,13 @@ private:
         }
 
         if ((incrementalEditCount_ & size_t{15}) != 0) return false;
-        const size_t depthLimit = maxAllowedDepth(objects_.size());
+        const size_t depthLimit = maxAllowedDepth(objectCount_);
         return maxTreeDepth(0) > depthLimit;
     }
 
     bool shouldRebuildForEditCount() const {
-        if (objects_.empty() || nodes_.empty()) return false;
-        const size_t editLimit = std::max<size_t>(size_t{64}, objects_.size() / 2);
+        if (objectCount_ == 0 || nodes_.empty()) return false;
+        const size_t editLimit = std::max<size_t>(size_t{64}, objectCount_ / 2);
         return incrementalEditCount_ >= editLimit;
     }
 
@@ -998,7 +1135,7 @@ private:
         return rayBoxEntry(origin, dir, node.bounds.min, node.bounds.max, maxDist, kVoxelEps, t);
     }
 
-    void collectPairs(int aIdx, int bIdx, std::vector<std::pair<ObjectId, ObjectId>>& out) const {
+    void collectPairs(int aIdx, int bIdx, std::vector<std::pair<ObjectIndex, ObjectIndex>>& out) const {
         const Node& a = nodes_[static_cast<size_t>(aIdx)];
         const Node& b = nodes_[static_cast<size_t>(bIdx)];
         if (!a.bounds.overlaps(b.bounds)) return;
@@ -1012,8 +1149,8 @@ private:
         }
 
         if (a.leaf() && b.leaf()) {
-            ObjectId idA = sortedIds_[a.start];
-            ObjectId idB = sortedIds_[b.start];
+            ObjectIndex idA = sortedIds_[a.start];
+            ObjectIndex idB = sortedIds_[b.start];
             if (idA == idB) return;
             if (idA > idB) std::swap(idA, idB);
             out.emplace_back(idA, idB);
@@ -1037,7 +1174,7 @@ private:
     void collectPairsWith(int aIdx,
                           const LinearBVH& other,
                           int bIdx,
-                          std::vector<std::pair<ObjectId, ObjectId>>& out) const {
+                          std::vector<std::pair<ObjectIndex, ObjectIndex>>& out) const {
         const Node& a = nodes_[static_cast<size_t>(aIdx)];
         const Node& b = other.nodes_[static_cast<size_t>(bIdx)];
         if (!a.bounds.overlaps(b.bounds)) return;
@@ -1061,11 +1198,14 @@ private:
         }
     }
 
-    DenseMap<ObjectId, Object> objects_;
+    std::vector<ObjectSlot> objects_;
+    std::vector<ObjectIndex> freeList_;
+    size_t objectCount_ = 0;
     mutable std::vector<Node> nodes_;
-    mutable std::vector<ObjectId> sortedIds_;
+    mutable std::vector<ObjectIndex> sortedIds_;
+    mutable std::vector<ObjectId> sortedObjectIds_;
     mutable std::vector<int> parents_;
-    mutable DenseMap<ObjectId, int> leafForObject_;
+    mutable std::vector<int> leafForObject_;
     mutable std::vector<int> pendingRefitLeaves_;
     mutable DenseSet<int> pendingRefitLeafSet_;
     mutable bool dirty_ = false;
@@ -1074,7 +1214,6 @@ private:
     mutable size_t unqueriedInsertCount_ = 0;
     mutable bool mortonOrderDirty_ = false;
     mutable float lastRebuildRootArea_ = 0.0f;
-    ObjectId nextId_ = 1;
 
     static constexpr size_t kDeferredInsertBatchThreshold = 64;
 };

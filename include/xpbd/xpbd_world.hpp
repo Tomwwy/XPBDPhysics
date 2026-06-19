@@ -23,6 +23,7 @@ namespace detail {
 
 struct SphereCollisionBroadphaseRef {
     Entity entity;
+    utils::LinearBVH::ObjectId objectId = utils::LinearBVH::kInvalid;
     bool particle = true;
     CollisionLayerMask collisionLayer = 0u;
     CollisionLayerMask collisionMask = 0u;
@@ -32,7 +33,7 @@ struct SphereCollisionBroadphaseRef {
 
 struct SphereCollisionLayerTree {
     utils::LinearBVH broadphase;
-    std::vector<SphereCollisionBroadphaseRef> refsByObject = {{}};
+    std::vector<SphereCollisionBroadphaseRef> refsByObject;
     std::unordered_map<std::uint64_t, utils::LinearBVH::ObjectId> objectByEntity;
     CollisionLayerMask bit = 0u;
     CollisionLayerMask aggregateCollisionMask = 0u;
