@@ -21,6 +21,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <type_traits>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -48,7 +49,7 @@ public:
         size_t start = 0;  // half-open range in sortedIds_ for leaves
         size_t end = 0;
 
-        bool leaf() const { return left < 0 && right < 0; }
+        [[nodiscard]] bool leaf() const { return left < 0 && right < 0; }
     };
 
     struct RayHit {
@@ -278,8 +279,7 @@ public:
         reserveQueryOutput(out);
 
         static thread_local std::vector<int> stack;
-        stack.clear();
-        if (stack.capacity() < 64) stack.reserve(64);
+        prepareScratchStack(stack);
         stack.push_back(0);
         while (!stack.empty()) {
             int nodeIdx = stack.back();
@@ -311,8 +311,7 @@ public:
 
         const float radiusSq = radius * radius;
         static thread_local std::vector<int> stack;
-        stack.clear();
-        if (stack.capacity() < 64) stack.reserve(64);
+        prepareScratchStack(stack);
         stack.push_back(0);
         while (!stack.empty()) {
             int nodeIdx = stack.back();
@@ -348,12 +347,9 @@ public:
         out.clear();
         if (objectCount_ < 2) return;
 
-        std::vector<std::pair<ObjectIndex, ObjectIndex>> indexPairs;
-        overlapPairs(indexPairs);
-        out.reserve(indexPairs.size());
-        for (const auto& pair : indexPairs) {
-            out.emplace_back(objectIdForIndex(pair.first), objectIdForIndex(pair.second));
-        }
+        ensureBuilt();
+        reservePairOutput(out);
+        collectPairs(0, 0, out);
     }
 
     std::vector<std::pair<ObjectIndex, ObjectIndex>> overlapPairs(const LinearBVH& other) const {
@@ -380,14 +376,16 @@ public:
     void overlapPairs(const LinearBVH& other,
                       std::vector<std::pair<ObjectId, ObjectId>>& out) const {
         out.clear();
+        if (&other == this) {
+            overlapPairs(out);
+            return;
+        }
         if (objectCount_ == 0 || other.objectCount_ == 0) return;
 
-        std::vector<std::pair<ObjectIndex, ObjectIndex>> indexPairs;
-        overlapPairs(other, indexPairs);
-        out.reserve(indexPairs.size());
-        for (const auto& pair : indexPairs) {
-            out.emplace_back(objectIdForIndex(pair.first), other.objectIdForIndex(pair.second));
-        }
+        ensureBuilt();
+        other.ensureBuilt();
+        reservePairOutput(out, other.objectCount_);
+        collectPairsWith(0, other, 0, out);
     }
 
     RayHit raycast(const Vec3& origin, const Vec3& dir, float maxDist = 1e6f) const {
@@ -404,8 +402,8 @@ public:
         float rootT = 0.0f;
         if (!intersectNode(0, origin, d, best.t, rootT)) return RayHit{};
 
-        std::vector<StackEntry> stack;
-        stack.reserve(64);
+        static thread_local std::vector<StackEntry> stack;
+        prepareScratchStack(stack);
         stack.push_back({0, rootT});
         while (!stack.empty()) {
             StackEntry entry = stack.back();
@@ -447,7 +445,7 @@ public:
         return best.hit ? best : RayHit{};
     }
 
-    static uint64_t morton3D64(uint32_t x, uint32_t y, uint32_t z) {
+    static constexpr uint64_t morton3D64(uint32_t x, uint32_t y, uint32_t z) {
         return expandBits21(x) | (expandBits21(y) << 1) | (expandBits21(z) << 2);
     }
 
@@ -522,7 +520,6 @@ private:
         }
         slot.object = std::move(obj);
         slot.alive = true;
-        if (index >= leafForObject_.size()) leafForObject_.resize(static_cast<size_t>(index) + 1u, -1);
         leafForObject_[index] = -1;
         ++objectCount_;
 
@@ -540,12 +537,8 @@ private:
     }
 
     ObjectSlot* slotFor(ObjectId id, ObjectIndex* outIndex = nullptr) {
-        const ObjectIndex index = indexOf(id);
-        if (outIndex != nullptr) *outIndex = index;
-        if (index == kInvalidIndex || index >= objects_.size()) return nullptr;
-
-        ObjectSlot& slot = objects_[index];
-        return slot.alive && slot.generation == generationOf(id) ? &slot : nullptr;
+        return const_cast<ObjectSlot*>(
+            static_cast<const LinearBVH*>(this)->slotFor(id, outIndex));
     }
 
     const ObjectSlot* slotFor(ObjectId id, ObjectIndex* outIndex = nullptr) const {
@@ -604,11 +597,16 @@ private:
     }
 
     static bool validQueryBounds(const AABB& b) {
-        return b.max.x >= b.min.x && b.max.y >= b.min.y && b.max.z >= b.min.z;
+        return finiteVec(b.min) && finiteVec(b.max) &&
+               b.max.x >= b.min.x && b.max.y >= b.min.y && b.max.z >= b.min.z;
     }
 
     static AABB unite(const AABB& a, const AABB& b) {
         return {vmin(a.min, b.min), vmax(a.max, b.max)};
+    }
+
+    static bool sameBounds(const AABB& a, const AABB& b) {
+        return a.min == b.min && a.max == b.max;
     }
 
     static float surfaceArea(const AABB& b) {
@@ -625,7 +623,7 @@ private:
     }
 
     size_t queryReserveHint() const {
-        return std::min(objectCount_, std::max<size_t>(size_t{8}, objectCount_ / 64));
+        return std::min(objectCount_, std::max<size_t>(size_t{64}, objectCount_ / 8));
     }
 
     void reserveQueryOutput(std::vector<ObjectId>& out) const {
@@ -635,7 +633,8 @@ private:
 
     template <typename Id>
     void reservePairOutput(std::vector<std::pair<Id, Id>>& out) const {
-        const size_t hint = std::min(objectCount_, std::max<size_t>(size_t{16}, objectCount_ / 8));
+        const size_t hint = std::min(scaledReserveLimit(objectCount_, 4),
+                                     std::max<size_t>(size_t{256}, objectCount_));
         if (out.capacity() < hint) out.reserve(hint);
     }
 
@@ -643,8 +642,21 @@ private:
     void reservePairOutput(std::vector<std::pair<Id, Id>>& out,
                            size_t otherObjectCount) const {
         const size_t smaller = std::min(objectCount_, otherObjectCount);
-        const size_t hint = std::min(smaller * 4u, std::max<size_t>(size_t{16}, smaller / 4u));
+        const size_t hint = std::min(scaledReserveLimit(smaller, 4),
+                                     std::max<size_t>(size_t{256}, smaller));
         if (out.capacity() < hint) out.reserve(hint);
+    }
+
+    static size_t scaledReserveLimit(size_t count, size_t factor) {
+        if (factor == 0) return 0;
+        const size_t maxValue = std::numeric_limits<size_t>::max();
+        return count > maxValue / factor ? maxValue : count * factor;
+    }
+
+    template <typename Entry>
+    static void prepareScratchStack(std::vector<Entry>& stack, size_t minCapacity = 64) {
+        stack.clear();
+        if (stack.capacity() < minCapacity) stack.reserve(minCapacity);
     }
 
     void ensureBuilt() const {
@@ -842,24 +854,17 @@ private:
             return;
         }
 
+        std::vector<BuildRef> refs;
         AABB centroidBounds;
-        if (!computeCentroidBounds(centroidBounds)) {
+        if (!buildRefsFromSortedIds(refs, centroidBounds)) {
+            rebuild();
+            return;
+        }
+        if (refs.empty()) {
             mortonOrderDirty_ = false;
             return;
         }
 
-        std::vector<BuildRef> refs;
-        refs.reserve(sortedIds_.size());
-        for (ObjectIndex id : sortedIds_) {
-            if (id == kInvalidIndex || id >= objects_.size() || !objects_[id].alive) {
-                rebuild();
-                return;
-            }
-            const Object& obj = objects_[id].object;
-            const Vec3 centroid = boundsCenter(obj.bounds);
-            refs.push_back({id, obj.bounds, centroid,
-                            mortonCode(centroid, centroidBounds)});
-        }
         std::sort(refs.begin(), refs.end(), [](const BuildRef& a, const BuildRef& b) {
             if (a.code != b.code) return a.code < b.code;
             return a.id < b.id;
@@ -886,12 +891,18 @@ private:
         mortonOrderDirty_ = false;
     }
 
-    bool computeCentroidBounds(AABB& centroidBounds) const {
-        bool first = true;
-        for (const ObjectSlot& slot : objects_) {
-            if (!slot.alive) continue;
+    bool buildRefsFromSortedIds(std::vector<BuildRef>& refs, AABB& centroidBounds) const {
+        refs.clear();
+        refs.reserve(sortedIds_.size());
 
-            const Vec3 c = boundsCenter(slot.object.bounds);
+        bool first = true;
+        for (ObjectIndex id : sortedIds_) {
+            if (id == kInvalidIndex || id >= objects_.size() || !objects_[id].alive) {
+                return false;
+            }
+
+            const Object& obj = objects_[id].object;
+            const Vec3 c = boundsCenter(obj.bounds);
             if (first) {
                 centroidBounds = {c, c};
                 first = false;
@@ -899,15 +910,21 @@ private:
                 centroidBounds.min = vmin(centroidBounds.min, c);
                 centroidBounds.max = vmax(centroidBounds.max, c);
             }
+            refs.push_back({id, obj.bounds, c, 0});
         }
-        return !first;
+
+        if (first) return true;
+        for (BuildRef& ref : refs) {
+            ref.code = mortonCode(ref.centroid, centroidBounds);
+        }
+        return true;
     }
 
     void refitAllInternalNodes() const {
         if (nodes_.empty()) return;
 
-        std::vector<std::pair<int, bool>> stack;
-        stack.reserve(nodes_.size());
+        static thread_local std::vector<std::pair<int, bool>> stack;
+        prepareScratchStack(stack, nodes_.size());
         stack.push_back({0, false});
         while (!stack.empty()) {
             const auto entry = stack.back();
@@ -970,15 +987,24 @@ private:
     }
 
     void refitAncestors(int nodeIdx) const {
+        bool canStopOnUnchanged = nodes_[static_cast<size_t>(nodeIdx)].leaf();
         for (int idx = nodeIdx; idx >= 0; idx = parents_[static_cast<size_t>(idx)]) {
             Node& node = nodes_[static_cast<size_t>(idx)];
             if (node.leaf()) continue;
 
             const Node& left = nodes_[static_cast<size_t>(node.left)];
             const Node& right = nodes_[static_cast<size_t>(node.right)];
-            node.bounds = unite(left.bounds, right.bounds);
-            node.start = std::min(left.start, right.start);
-            node.end = std::max(left.end, right.end);
+            const AABB bounds = unite(left.bounds, right.bounds);
+            const size_t start = std::min(left.start, right.start);
+            const size_t end = std::max(left.end, right.end);
+            if (sameBounds(node.bounds, bounds) && node.start == start && node.end == end) {
+                if (canStopOnUnchanged) break;
+            } else {
+                node.bounds = bounds;
+                node.start = start;
+                node.end = end;
+            }
+            canStopOnUnchanged = true;
         }
     }
 
@@ -1021,8 +1047,8 @@ private:
 
     size_t maxTreeDepth(int nodeIdx) const {
         size_t best = 0;
-        std::vector<std::pair<int, size_t>> stack;
-        stack.reserve(64);
+        static thread_local std::vector<std::pair<int, size_t>> stack;
+        prepareScratchStack(stack);
         stack.push_back({nodeIdx, 1});
         while (!stack.empty()) {
             const auto entry = stack.back();
@@ -1090,7 +1116,7 @@ private:
 #endif
     }
 
-    static uint64_t expandBits21(uint32_t v) {
+    static constexpr uint64_t expandBits21(uint32_t v) {
         uint64_t x = static_cast<uint64_t>(v) & UINT64_C(0x1fffff);
         x = (x | (x << 32)) & UINT64_C(0x1f00000000ffff);
         x = (x | (x << 16)) & UINT64_C(0x1f0000ff0000ff);
@@ -1124,66 +1150,112 @@ private:
         return rayBoxEntry(origin, dir, node.bounds.min, node.bounds.max, maxDist, kVoxelEps, t);
     }
 
-    void collectPairs(int aIdx, int bIdx, std::vector<std::pair<ObjectIndex, ObjectIndex>>& out) const {
-        const Node& a = nodes_[static_cast<size_t>(aIdx)];
-        const Node& b = nodes_[static_cast<size_t>(bIdx)];
-        if (!a.bounds.overlaps(b.bounds)) return;
+    template <typename Id>
+    void appendSelfPair(std::vector<std::pair<Id, Id>>& out,
+                        ObjectIndex idA,
+                        ObjectIndex idB) const {
+        static_assert(std::is_same_v<Id, ObjectIndex> || std::is_same_v<Id, ObjectId>,
+                      "LinearBVH pair output ids must be ObjectIndex or ObjectId");
+        if (idA == idB) return;
+        if (idA > idB) std::swap(idA, idB);
 
-        if (aIdx == bIdx) {
-            if (a.leaf()) return;
-            collectPairs(a.left, a.left, out);
-            collectPairs(a.left, a.right, out);
-            collectPairs(a.right, a.right, out);
-            return;
-        }
-
-        if (a.leaf() && b.leaf()) {
-            ObjectIndex idA = sortedIds_[a.start];
-            ObjectIndex idB = sortedIds_[b.start];
-            if (idA == idB) return;
-            if (idA > idB) std::swap(idA, idB);
-            out.emplace_back(idA, idB);
-            return;
-        }
-
-        if (a.leaf()) {
-            collectPairs(aIdx, b.left, out);
-            collectPairs(aIdx, b.right, out);
-        } else if (b.leaf()) {
-            collectPairs(a.left, bIdx, out);
-            collectPairs(a.right, bIdx, out);
+        if constexpr (std::is_same_v<Id, ObjectId>) {
+            out.emplace_back(objectIdForIndex(idA), objectIdForIndex(idB));
         } else {
-            collectPairs(a.left, b.left, out);
-            collectPairs(a.left, b.right, out);
-            collectPairs(a.right, b.left, out);
-            collectPairs(a.right, b.right, out);
+            out.emplace_back(idA, idB);
         }
     }
 
+    template <typename Id>
+    void appendCrossPair(std::vector<std::pair<Id, Id>>& out,
+                         const LinearBVH& other,
+                         ObjectIndex idA,
+                         ObjectIndex idB) const {
+        static_assert(std::is_same_v<Id, ObjectIndex> || std::is_same_v<Id, ObjectId>,
+                      "LinearBVH pair output ids must be ObjectIndex or ObjectId");
+        if constexpr (std::is_same_v<Id, ObjectId>) {
+            out.emplace_back(objectIdForIndex(idA), other.objectIdForIndex(idB));
+        } else {
+            out.emplace_back(idA, idB);
+        }
+    }
+
+    template <typename Id>
+    void collectPairs(int aIdx, int bIdx, std::vector<std::pair<Id, Id>>& out) const {
+        static thread_local std::vector<std::pair<int, int>> stack;
+        prepareScratchStack(stack);
+        stack.push_back({aIdx, bIdx});
+
+        while (!stack.empty()) {
+            const auto entry = stack.back();
+            stack.pop_back();
+
+            const Node& a = nodes_[static_cast<size_t>(entry.first)];
+            const Node& b = nodes_[static_cast<size_t>(entry.second)];
+            if (!a.bounds.overlaps(b.bounds)) continue;
+
+            if (entry.first == entry.second) {
+                if (a.leaf()) continue;
+                stack.push_back({a.right, a.right});
+                stack.push_back({a.left, a.right});
+                stack.push_back({a.left, a.left});
+                continue;
+            }
+
+            if (a.leaf() && b.leaf()) {
+                appendSelfPair(out, sortedIds_[a.start], sortedIds_[b.start]);
+                continue;
+            }
+
+            if (a.leaf()) {
+                stack.push_back({entry.first, b.right});
+                stack.push_back({entry.first, b.left});
+            } else if (b.leaf()) {
+                stack.push_back({a.right, entry.second});
+                stack.push_back({a.left, entry.second});
+            } else {
+                stack.push_back({a.right, b.right});
+                stack.push_back({a.right, b.left});
+                stack.push_back({a.left, b.right});
+                stack.push_back({a.left, b.left});
+            }
+        }
+    }
+
+    template <typename Id>
     void collectPairsWith(int aIdx,
                           const LinearBVH& other,
                           int bIdx,
-                          std::vector<std::pair<ObjectIndex, ObjectIndex>>& out) const {
-        const Node& a = nodes_[static_cast<size_t>(aIdx)];
-        const Node& b = other.nodes_[static_cast<size_t>(bIdx)];
-        if (!a.bounds.overlaps(b.bounds)) return;
+                          std::vector<std::pair<Id, Id>>& out) const {
+        static thread_local std::vector<std::pair<int, int>> stack;
+        prepareScratchStack(stack);
+        stack.push_back({aIdx, bIdx});
 
-        if (a.leaf() && b.leaf()) {
-            out.emplace_back(sortedIds_[a.start], other.sortedIds_[b.start]);
-            return;
-        }
+        while (!stack.empty()) {
+            const auto entry = stack.back();
+            stack.pop_back();
 
-        if (a.leaf()) {
-            collectPairsWith(aIdx, other, b.left, out);
-            collectPairsWith(aIdx, other, b.right, out);
-        } else if (b.leaf()) {
-            collectPairsWith(a.left, other, bIdx, out);
-            collectPairsWith(a.right, other, bIdx, out);
-        } else {
-            collectPairsWith(a.left, other, b.left, out);
-            collectPairsWith(a.left, other, b.right, out);
-            collectPairsWith(a.right, other, b.left, out);
-            collectPairsWith(a.right, other, b.right, out);
+            const Node& a = nodes_[static_cast<size_t>(entry.first)];
+            const Node& b = other.nodes_[static_cast<size_t>(entry.second)];
+            if (!a.bounds.overlaps(b.bounds)) continue;
+
+            if (a.leaf() && b.leaf()) {
+                appendCrossPair(out, other, sortedIds_[a.start], other.sortedIds_[b.start]);
+                continue;
+            }
+
+            if (a.leaf()) {
+                stack.push_back({entry.first, b.right});
+                stack.push_back({entry.first, b.left});
+            } else if (b.leaf()) {
+                stack.push_back({a.right, entry.second});
+                stack.push_back({a.left, entry.second});
+            } else {
+                stack.push_back({a.right, b.right});
+                stack.push_back({a.right, b.left});
+                stack.push_back({a.left, b.right});
+                stack.push_back({a.left, b.left});
+            }
         }
     }
 
