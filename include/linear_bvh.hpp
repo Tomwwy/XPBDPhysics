@@ -152,7 +152,6 @@ public:
         objectCount_ = 0;
         nodes_.clear();
         sortedIds_.clear();
-        sortedObjectIds_.clear();
         parents_.clear();
         leafForObject_.clear();
         pendingRefitLeaves_.clear();
@@ -202,16 +201,6 @@ public:
         ensureBuilt();
         if (mortonOrderDirty_) sortIdsByMortonAndRelinkLeaves();
         return sortedIds_;
-    }
-
-    const std::vector<ObjectId>& sortedIds() const {
-        const std::vector<ObjectIndex>& indices = sortedIndices();
-        sortedObjectIds_.clear();
-        sortedObjectIds_.reserve(indices.size());
-        for (ObjectIndex index : indices) {
-            sortedObjectIds_.push_back(objectIdForIndex(index));
-        }
-        return sortedObjectIds_;
     }
 
     void rebuild() const {
@@ -1203,7 +1192,6 @@ private:
     size_t objectCount_ = 0;
     mutable std::vector<Node> nodes_;
     mutable std::vector<ObjectIndex> sortedIds_;
-    mutable std::vector<ObjectId> sortedObjectIds_;
     mutable std::vector<int> parents_;
     mutable std::vector<int> leafForObject_;
     mutable std::vector<int> pendingRefitLeaves_;
