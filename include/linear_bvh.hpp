@@ -819,6 +819,7 @@ private:
     void rebindMovedNode(int nodeIdx) {
         Node& node = nodes_[static_cast<size_t>(nodeIdx)];
         if (node.leaf()) {
+            assert(node.start < sortedIds_.size());
             leafForObject_[sortedIds_[node.start]] = nodeIdx;
             return;
         }
