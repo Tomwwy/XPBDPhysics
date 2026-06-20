@@ -47,7 +47,6 @@ set_target_properties(raylib PROPERTIES
 
 add_library(xpbd STATIC
     src/xpbd/systems/distance_constraint_system.cpp
-    src/xpbd/systems/sphere_collision_system.cpp
     src/xpbd/systems/verlet_integration_system.cpp
     src/xpbd/xpbd_simd.cpp
     src/xpbd/xpbd_world.cpp
@@ -84,6 +83,16 @@ else()
 endif()
 
 target_link_libraries(xpbd_physics PRIVATE xpbd raylib)
+
+add_executable(xpbd_tests tests/foundation_tests.cpp)
+target_link_libraries(xpbd_tests PRIVATE xpbd)
+if(MSVC)
+    target_compile_options(xpbd_tests PRIVATE /W4)
+else()
+    target_compile_options(xpbd_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+enable_testing()
+add_test(NAME xpbd_foundation COMMAND xpbd_tests)
 
 add_custom_command(TARGET xpbd_physics POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different

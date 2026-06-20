@@ -21,6 +21,7 @@ enum class EntityType : std::uint16_t {
     BoxRigidBody = 11,
     TetrahedronRigidBody = 12,
     CapsuleRigidBody = 13,
+    Collider = 14,
 };
 
 struct Entity {

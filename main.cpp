@@ -19,6 +19,8 @@ constexpr int kMeshVertexBufferPosition = 0;
 constexpr int kMeshVertexBufferNormal = 2;
 constexpr xpbd::CollisionLayerMask kClothCollisionLayer = xpbd::CollisionLayerMask{1u} << 0u;
 constexpr xpbd::CollisionLayerMask kColliderCollisionLayer = xpbd::CollisionLayerMask{1u} << 1u;
+constexpr float kClothParticleRadius = 0.018f;
+constexpr float kCollisionSphereRadius = 0.52f;
 
 Vector3 toRaylib(const xpbd::Vec3& value)
 {
@@ -29,9 +31,12 @@ struct ClothDemo {
     int columns = 34;
     int rows = 22;
     float spacing = 0.13f;
-    xpbd::Entity collisionSphere;
+    xpbd::Entity collisionSphere;        // static collider entity
+    xpbd::Vec3 collisionSphereCenter = {0.0f, 0.72f, 0.05f};
+    float collisionSphereRadius = kCollisionSphereRadius;
     bool selfCollisionEnabled = false;
     std::vector<xpbd::Entity> particles;
+    std::vector<xpbd::Entity> colliders;  // parallel to particles
     std::vector<xpbd::Entity> pinnedParticles;
     std::vector<xpbd::Entity> constraints;
 
@@ -283,10 +288,10 @@ xpbd::CollisionLayerMask clothParticleCollisionMask(const ClothDemo& cloth)
 void applyClothCollisionFilters(xpbd::XPBDWorld& world, const ClothDemo& cloth)
 {
     const xpbd::CollisionLayerMask clothMask = clothParticleCollisionMask(cloth);
-    for (xpbd::Entity particleEntity : cloth.particles) {
-        world.setParticleCollisionFilter(particleEntity, kClothCollisionLayer, clothMask);
+    for (xpbd::Entity colliderEntity : cloth.colliders) {
+        world.setColliderFilter(colliderEntity, kClothCollisionLayer, clothMask);
     }
-    world.setCollisionSphereFilter(cloth.collisionSphere, kColliderCollisionLayer, kClothCollisionLayer);
+    world.setColliderFilter(cloth.collisionSphere, kColliderCollisionLayer, kClothCollisionLayer);
 }
 
 xpbd::Vec3 sampleWindowAcceleration(RandomWindowForceSettings& settings)
@@ -340,7 +345,7 @@ void updateRuntimeSettings(xpbd::XPBDWorld& world, RandomWindowForceSettings& se
     const float sizeStep = (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) ? 0.4f : 0.15f;
 
     if (IsKeyPressed(KEY_C)) {
-        world.setSphereCollisionsEnabled(!world.sphereCollisionsEnabled());
+        world.setCollisionsEnabled(!world.collisionsEnabled());
     }
     if (IsKeyPressed(KEY_S)) {
         cloth.selfCollisionEnabled = !cloth.selfCollisionEnabled;
@@ -373,15 +378,18 @@ void buildCloth(xpbd::XPBDWorld& world, ClothDemo& cloth)
 {
     world.clearEntities();
     cloth.particles.clear();
+    cloth.colliders.clear();
     cloth.pinnedParticles.clear();
     cloth.constraints.clear();
     cloth.particles.reserve(static_cast<std::size_t>(cloth.columns * cloth.rows));
+    cloth.colliders.reserve(static_cast<std::size_t>(cloth.columns * cloth.rows));
     cloth.pinnedParticles.reserve(static_cast<std::size_t>(cloth.columns));
     cloth.constraints.reserve(static_cast<std::size_t>(cloth.columns * cloth.rows * 6));
 
     const float startX = -0.5f * static_cast<float>(cloth.columns - 1) * cloth.spacing;
     const float topY = 2.25f;
 
+    const xpbd::CollisionLayerMask clothMask = clothParticleCollisionMask(cloth);
     for (int row = 0; row < cloth.rows; ++row) {
         for (int column = 0; column < cloth.columns; ++column) {
             const float x = startX + static_cast<float>(column) * cloth.spacing;
@@ -389,12 +397,15 @@ void buildCloth(xpbd::XPBDWorld& world, ClothDemo& cloth)
             const float z = 0.04f * std::sin(static_cast<float>(column) * 0.5f);
             const bool pinned = row == 0 && (column % 3 == 0 || column == cloth.columns - 1);
             const float mass = pinned ? 0.0f : 1.0f;
-            const xpbd::Entity particle = world.createParticle({x, y, z},
-                                                               mass,
-                                                               0.018f,
-                                                               kClothCollisionLayer,
-                                                               clothParticleCollisionMask(cloth));
+            const xpbd::Entity particle = world.createParticle({x, y, z}, mass);
+            const xpbd::Entity collider = world.createCollider(
+                particle,
+                xpbd::Shape::makeSphere(kClothParticleRadius),
+                kClothCollisionLayer,
+                clothMask,
+                xpbd::BroadphasePartition::Dynamic);
             cloth.particles.push_back(particle);
+            cloth.colliders.push_back(collider);
             if (pinned) {
                 cloth.pinnedParticles.push_back(particle);
             }
@@ -428,10 +439,13 @@ void buildCloth(xpbd::XPBDWorld& world, ClothDemo& cloth)
         }
     }
 
-    cloth.collisionSphere = world.createCollisionSphere({0.0f, 0.72f, 0.05f},
-                                                        0.52f,
-                                                        kColliderCollisionLayer,
-                                                        kClothCollisionLayer);
+    cloth.collisionSphereCenter = {0.0f, 0.72f, 0.05f};
+    cloth.collisionSphereRadius = kCollisionSphereRadius;
+    cloth.collisionSphere = world.createStaticCollider(
+        xpbd::Shape::makeSphere(cloth.collisionSphereRadius),
+        cloth.collisionSphereCenter,
+        kColliderCollisionLayer,
+        kClothCollisionLayer);
 }
 
 void drawClothDebug(const xpbd::XPBDWorld& world)
@@ -450,7 +464,7 @@ void drawClothDebug(const xpbd::XPBDWorld& world)
 
     world.forEachParticle([](xpbd::Entity, const xpbd::Particle& particle) {
         const bool pinned = particle.inverseMass <= 0.0f;
-        const float radius = pinned ? particle.radius * 1.9f : particle.radius;
+        const float radius = pinned ? kClothParticleRadius * 1.9f : kClothParticleRadius;
         const Color color = pinned ? Color{255, 115, 76, 255} : Color{74, 188, 255, 255};
         DrawSphere(toRaylib(particle.position), radius, color);
     });
@@ -464,25 +478,19 @@ void drawPinnedParticles(const xpbd::XPBDWorld& world, const ClothDemo& cloth)
             continue;
         }
 
-        DrawSphereEx(toRaylib(particle->position), particle->radius * 1.9f, 5, 8, Color{255, 115, 76, 255});
+        DrawSphereEx(toRaylib(particle->position), kClothParticleRadius * 1.9f, 5, 8, Color{255, 115, 76, 255});
     }
 }
 
-void drawCollisionSpheres(const xpbd::XPBDWorld& world)
+void drawCollisionSpheres(const xpbd::XPBDWorld& world, const ClothDemo& cloth)
 {
-    const bool enabled = world.sphereCollisionsEnabled();
+    const bool enabled = world.collisionsEnabled();
     const Color fillColor = enabled ? Color{255, 183, 77, 48} : Color{120, 128, 138, 36};
     const Color wireColor = enabled ? Color{255, 204, 118, 230} : Color{145, 152, 160, 180};
 
-    world.forEachCollisionSphere([fillColor, wireColor](xpbd::Entity, const xpbd::CollisionSphere& sphere) {
-        if (!sphere.enabled) {
-            return;
-        }
-
-        const Vector3 center = toRaylib(sphere.center);
-        DrawSphere(center, sphere.radius, fillColor);
-        DrawSphereWires(center, sphere.radius, 24, 16, wireColor);
-    });
+    const Vector3 center = toRaylib(cloth.collisionSphereCenter);
+    DrawSphere(center, cloth.collisionSphereRadius, fillColor);
+    DrawSphereWires(center, cloth.collisionSphereRadius, 24, 16, wireColor);
 }
 
 void drawRandomWindowForce(const RandomWindowForceSettings& settings)
@@ -578,8 +586,8 @@ int main()
     world.setDamping(0.997f);
     world.setSubsteps(4);
     world.setSolverIterations(10);
-    world.setSphereCollisionsEnabled(true);
-    world.setSphereCollisionCompliance(0.0f);
+    world.setCollisionsEnabled(true);
+    world.setContactCompliance(0.0f);
 
     RandomWindowForceSettings windowForce;
     world.addIntegrationSystem([&windowForce](xpbd::XPBDWorld& forceWorld, float subDt) {
@@ -587,7 +595,6 @@ int main()
     });
     world.addIntegrationSystem(xpbd::XPBDWorld::verletIntegrationSystem);
     world.addConstraintSystem(xpbd::XPBDWorld::distanceConstraintSystem);
-    world.addConstraintSystem(xpbd::XPBDWorld::sphereCollisionSystem);
 
     ClothDemo cloth;
     buildCloth(world, cloth);
@@ -628,7 +635,7 @@ int main()
 
         BeginMode3D(camera);
         DrawGrid(24, 0.25f);
-        drawCollisionSpheres(world);
+        drawCollisionSpheres(world, cloth);
         drawRandomWindowForce(windowForce);
         if (debugRender) {
             drawClothDebug(world);
@@ -654,17 +661,17 @@ int main()
                       simMs,
                       renderMs,
                       paused ? "paused" : "running",
-                      world.sphereCollisionsEnabled() ? "on" : "off",
+                      world.collisionsEnabled() ? "on" : "off",
                       cloth.selfCollisionEnabled ? "on" : "off");
         DrawText(timings, 10, 56, 18, Color{210, 218, 226, 255});
         char collisionStats[180] = {};
         std::snprintf(collisionStats,
                       sizeof(collisionStats),
-                      "bvh nodes: %zu  broadphase pairs: %zu  contacts: %zu  collision spheres: %zu",
-                      world.sphereCollisionBvhNodeCount(),
-                      world.sphereCollisionBroadphasePairCount(),
-                      world.sphereCollisionContactCount(),
-                      world.collisionSphereCount());
+                      "bvh nodes: %zu  broadphase pairs: %zu  contacts: %zu  colliders: %zu",
+                      world.broadphaseNodeCount(),
+                      world.broadphasePairCount(),
+                      world.contactCount(),
+                      world.colliderCount());
         DrawText(collisionStats, 10, 78, 18, Color{210, 218, 226, 255});
         char forceStats[220] = {};
         std::snprintf(forceStats,

@@ -80,6 +80,45 @@ public:
         return insertOwned(std::make_unique<SphereCollider>(center, radius));
     }
 
+    // Lightweight proxy: register an AABB plus an opaque 64-bit payload without
+    // any Collider allocation. Intended for physics broadphase, where the owner
+    // recomputes bounds every step and resolves the payload back to its own
+    // records. Proxies carry no geometry, so raycast() skips them.
+    ObjectId insertProxy(const AABB& bounds, uint64_t userData = 0) {
+        if (!validObjectBounds(bounds)) return kInvalid;
+        Object obj;
+        obj.collider = nullptr;
+        obj.bounds = bounds;
+        obj.userData = userData;
+        return commitObject(std::move(obj));
+    }
+
+    bool updateProxy(ObjectId id, const AABB& bounds) {
+        ObjectIndex index = kInvalidIndex;
+        ObjectSlot* slot = slotFor(id, &index);
+        if (slot == nullptr || !validObjectBounds(bounds)) return false;
+
+        slot->object.bounds = bounds;
+        markUpdated(index, bounds);
+        return true;
+    }
+
+    // Opaque payload stored with insertProxy / insert. Lookup by live index
+    // (as returned from overlapPairs) or by stable ObjectId.
+    uint64_t userData(ObjectIndex index) const {
+        return liveObjectIndex(index) ? objects_[index].object.userData : 0u;
+    }
+
+    uint64_t userDataForId(ObjectId id) const {
+        const Object* object = objectFor(id);
+        return object != nullptr ? object->userData : 0u;
+    }
+
+    void setUserData(ObjectId id, uint64_t userData) {
+        Object* object = objectFor(id);
+        if (object != nullptr) object->userData = userData;
+    }
+
     ObjectId insertBox(const AABB& box) {
         return insertOwned(std::make_unique<BoxCollider>(box));
     }
@@ -449,6 +488,7 @@ public:
                 const ObjectIndex index = liveIndexForLeaf(node);
                 if (index == kInvalidIndex) continue;
                 const Object& obj = objects_[index].object;
+                if (obj.collider == nullptr) continue;  // proxy: no narrowphase geometry
                 float t = 0.0f;
                 if (obj.collider->raycast(origin, d, best.t, t) &&
                     (!best.hit || t < best.t)) {
@@ -489,6 +529,7 @@ private:
         const Collider* collider = nullptr;
         std::unique_ptr<Collider> owned;
         AABB bounds;
+        uint64_t userData = 0;
     };
 
     struct ObjectSlot {

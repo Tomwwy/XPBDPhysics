@@ -2,7 +2,10 @@
 #define XPBD_WORLD_HPP
 
 #include "linear_bvh.hpp"
-#include "xpbd/colliders/collision_sphere.hpp"
+#include "utils/shapes.hpp"
+#include "xpbd/broadphase_partition.hpp"
+#include "xpbd/colliders/collider.hpp"
+#include "xpbd/constraints/contact_constraint.hpp"
 #include "xpbd/constraints/distance_constraint.hpp"
 #include "xpbd/entity.hpp"
 #include "xpbd/particle.hpp"
@@ -13,34 +16,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace xpbd {
-
-namespace detail {
-
-struct SphereCollisionBroadphaseRef {
-    Entity entity;
-    utils::LinearBVH::ObjectId objectId = utils::LinearBVH::kInvalid;
-    bool particle = true;
-    CollisionLayerMask collisionLayer = 0u;
-    CollisionLayerMask collisionMask = 0u;
-    std::uint64_t lastSeenStamp = 0u;
-    bool registered = false;
-};
-
-struct SphereCollisionLayerTree {
-    utils::LinearBVH broadphase;
-    std::vector<SphereCollisionBroadphaseRef> refsByObject;
-    std::unordered_map<std::uint64_t, utils::LinearBVH::ObjectId> objectByEntity;
-    CollisionLayerMask bit = 0u;
-    CollisionLayerMask aggregateCollisionMask = 0u;
-    bool active = false;
-};
-
-}  // namespace detail
 
 class XPBDWorld {
 public:
@@ -48,41 +27,53 @@ public:
 
     XPBDWorld();
 
-    Entity createParticle(const Vec3& position,
-                          float mass,
-                          float radius = 0.025f,
-                          CollisionLayerMask collisionLayer = kCollisionLayerDefault,
-                          CollisionLayerMask collisionMask = kCollisionLayerAll);
+    // --- Entity creation ---------------------------------------------------
+    Entity createParticle(const Vec3& position, float mass);
     Entity createDistanceConstraint(Entity particleA,
                                     Entity particleB,
                                     float restLength,
                                     float compliance = 0.0f);
-    Entity createCollisionSphere(const Vec3& center,
-                                 float radius,
-                                 CollisionLayerMask collisionLayer = kCollisionLayerDefault,
-                                 CollisionLayerMask collisionMask = kCollisionLayerAll);
+
+    // Attach collision geometry + filtering to a body (a particle today). The
+    // proxy lives in `partition`'s broadphase; `offset` is added to the body's
+    // world origin.
+    Entity createCollider(Entity body,
+                          const Shape& shape,
+                          CollisionLayerMask layer = kCollisionLayerDefault,
+                          CollisionLayerMask mask = kCollisionLayerAll,
+                          BroadphasePartition partition = BroadphasePartition::Dynamic,
+                          const Vec3& offset = {});
+
+    // Body-less static collider placed directly in the world (Static partition).
+    Entity createStaticCollider(const Shape& shape,
+                                const Vec3& worldPosition,
+                                CollisionLayerMask layer = kCollisionLayerDefault,
+                                CollisionLayerMask mask = kCollisionLayerAll);
 
     bool destroy(Entity entity);
     bool alive(Entity entity) const;
 
+    // --- Accessors ---------------------------------------------------------
     Particle* particle(Entity entity);
     const Particle* particle(Entity entity) const;
 
     DistanceConstraint* distanceConstraint(Entity entity);
     const DistanceConstraint* distanceConstraint(Entity entity) const;
 
-    CollisionSphere* collisionSphere(Entity entity);
-    const CollisionSphere* collisionSphere(Entity entity) const;
+    Collider* collider(Entity entity);
+    const Collider* collider(Entity entity) const;
 
-    bool setParticleCollisionFilter(Entity entity,
-                                    CollisionLayerMask collisionLayer,
-                                    CollisionLayerMask collisionMask);
-    bool setCollisionSphereFilter(Entity entity,
-                                  CollisionLayerMask collisionLayer,
-                                  CollisionLayerMask collisionMask);
+    // World-space sphere of a collider's shape, using the current body pose.
+    // Returns false when the collider/shape/body is missing or degenerate.
+    bool colliderWorldSphere(Entity entity, Vec3& center, float& radius) const;
+
+    bool setColliderFilter(Entity entity,
+                           CollisionLayerMask layer,
+                           CollisionLayerMask mask);
 
     void clearEntities();
 
+    // --- Configuration -----------------------------------------------------
     void setGravity(const Vec3& gravity);
     const Vec3& gravity() const;
 
@@ -95,11 +86,15 @@ public:
     void setSubsteps(int substeps);
     int substeps() const;
 
-    void setSphereCollisionsEnabled(bool enabled);
-    bool sphereCollisionsEnabled() const;
+    void setCollisionsEnabled(bool enabled);
+    bool collisionsEnabled() const;
 
-    void setSphereCollisionCompliance(float compliance);
-    float sphereCollisionCompliance() const;
+    void setContactCompliance(float compliance);
+    float contactCompliance() const;
+
+    // 0 disables cadence rebuilds; structural changes still rebuild lazily.
+    void setBroadphaseRebuildInterval(std::size_t interval);
+    std::size_t broadphaseRebuildInterval() const;
 
     void addIntegrationSystem(System system);
     void addConstraintSystem(System system);
@@ -107,21 +102,20 @@ public:
 
     void step(float dt);
 
+    // --- Statistics --------------------------------------------------------
     std::size_t particleSlots() const;
     std::size_t particleCount() const;
     std::size_t distanceConstraintSlots() const;
     std::size_t distanceConstraintCount() const;
-    std::size_t collisionSphereSlots() const;
-    std::size_t collisionSphereCount() const;
-    std::size_t sphereCollisionBroadphasePairCount() const;
-    std::size_t sphereCollisionContactCount() const;
-    std::size_t sphereCollisionBvhNodeCount() const;
-    std::size_t sphereCollisionBvhRebuildInterval() const;
-    // 0 disables cadence rebuilds; structural changes and degradation can still rebuild lazily.
-    void setSphereCollisionBvhRebuildInterval(std::size_t interval);
+    std::size_t colliderSlots() const;
+    std::size_t colliderCount() const;
+    std::size_t broadphasePairCount() const;
+    std::size_t contactCount() const;
+    std::size_t broadphaseNodeCount() const;
 
     const char* simdBackendName() const;
 
+    // --- Iteration ---------------------------------------------------------
     template <typename Func>
     void forEachParticle(Func&& func)
     {
@@ -147,44 +141,51 @@ public:
     }
 
     template <typename Func>
-    void forEachCollisionSphere(Func&& func)
+    void forEachCollider(Func&& func)
     {
-        collisionSpheres_.forEachAlive(EntityType::SphereRigidBody, std::forward<Func>(func));
+        colliders_.forEachAlive(EntityType::Collider, std::forward<Func>(func));
     }
 
     template <typename Func>
-    void forEachCollisionSphere(Func&& func) const
+    void forEachCollider(Func&& func) const
     {
-        collisionSpheres_.forEachAlive(EntityType::SphereRigidBody, std::forward<Func>(func));
+        colliders_.forEachAlive(EntityType::Collider, std::forward<Func>(func));
     }
 
     static void verletIntegrationSystem(XPBDWorld& world, float dt);
     static void distanceConstraintSystem(XPBDWorld& world, float dt);
-    static void sphereCollisionSystem(XPBDWorld& world, float dt);
 
 private:
     void resetConstraintLambdas();
     void updateParticleVelocities(float dt);
 
+    // Collision pipeline (built-in, gated by collisionsEnabled_).
+    void refreshBroadphase();
+    void removeColliderProxy(Collider& collider);
+    void generateContacts(float dt);
+    void solveContacts(float dt);
+
+    utils::LinearBVH& broadphase(BroadphasePartition partition);
+
     TypedStore<Particle> particles_;
     TypedStore<DistanceConstraint> distanceConstraints_;
-    TypedStore<CollisionSphere> collisionSpheres_;
+    TypedStore<Collider> colliders_;
     std::vector<System> integrationSystems_;
     std::vector<System> constraintSystems_;
+    std::array<utils::LinearBVH, kBroadphasePartitionCount> broadphases_;
+    std::vector<ContactConstraint> contacts_;
     const detail::SimdDispatch* simd_ = nullptr;
     Vec3 gravity_ = {0.0f, -9.81f, 0.0f};
     float damping_ = 0.995f;
     int solverIterations_ = 8;
     int substeps_ = 4;
-    bool sphereCollisionsEnabled_ = true;
-    float sphereCollisionCompliance_ = 0.0f;
-    std::array<detail::SphereCollisionLayerTree, kCollisionLayerBitCount> sphereCollisionLayers_;
-    std::uint64_t sphereCollisionBroadphaseStamp_ = 0u;
-    std::size_t sphereCollisionBroadphaseSolveCount_ = 0u;
-    std::size_t sphereCollisionBvhRebuildInterval_ = 32u;
-    std::size_t sphereCollisionBroadphasePairs_ = 0;
-    std::size_t sphereCollisionContacts_ = 0;
-    std::size_t sphereCollisionBvhNodes_ = 0;
+    bool collisionsEnabled_ = true;
+    float contactCompliance_ = 0.0f;
+    std::size_t broadphaseRebuildInterval_ = 32u;
+    std::size_t broadphaseSolveCount_ = 0u;
+    std::size_t broadphasePairs_ = 0;
+    std::size_t contacts_count_ = 0;
+    std::size_t broadphaseNodes_ = 0;
 };
 
 }  // namespace xpbd
