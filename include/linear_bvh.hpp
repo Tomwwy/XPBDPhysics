@@ -48,6 +48,7 @@ public:
         int right = -1;
         size_t start = 0;  // half-open range in sortedIds_ for leaves
         size_t end = 0;
+        bool dead = false;
 
         [[nodiscard]] bool leaf() const { return left < 0 && right < 0; }
     };
@@ -97,16 +98,34 @@ public:
         ObjectSlot* slot = slotFor(id, &index);
         if (slot == nullptr) return;
 
+        if (!dirty_ && refitDirty_) {
+            if (shouldRebuildAfterIncrementalEdits()) {
+                markDirtyForRebuild();
+            } else {
+                refitPending();
+            }
+        }
+
+        const bool canTombstone = canRemoveIncrementally(index);
+        const int removedLeafIdx = canTombstone ? leafForObject_[index] : -1;
+
         slot->object = Object{};
         slot->alive = false;
         slot->generation = nextGeneration(slot->generation);
-        if (index < leafForObject_.size()) leafForObject_[index] = -1;
         freeList_.push_back(index);
         --objectCount_;
-        dirty_ = true;
-        refitDirty_ = false;
-        pendingRefitLeaves_.clear();
-        pendingRefitLeafSet_.clear();
+
+        if (objectCount_ == 0) {
+            clearTreeStorage();
+        } else if (canTombstone) {
+            tombstoneLeaf(removedLeafIdx);
+            if (index < leafForObject_.size()) leafForObject_[index] = -1;
+            if (shouldRebuildForDeadLeaves()) markDirtyForRebuild();
+        } else {
+            if (index < leafForObject_.size()) leafForObject_[index] = -1;
+            markDirtyForRebuild();
+        }
+        sortedObjectIdsCacheDirty_ = true;
     }
 
     // Borrowed update: `collider` must outlive the BVH registration.
@@ -153,15 +172,22 @@ public:
         objectCount_ = 0;
         nodes_.clear();
         sortedIds_.clear();
+        sortedObjectIdsCache_.clear();
         parents_.clear();
         leafForObject_.clear();
         pendingRefitLeaves_.clear();
         pendingRefitLeafSet_.clear();
         dirty_ = false;
         refitDirty_ = false;
-        incrementalEditCount_ = 0;
+        incrementalInsertCount_ = 0;
+        incrementalRefitCount_ = 0;
+        deadLeafCount_ = 0;
         unqueriedInsertCount_ = 0;
-        lastRebuildRootArea_ = 0.0f;
+        mortonOrderDirty_ = false;
+        sortedObjectIdsCacheDirty_ = false;
+        liveBounds_ = AABB{};
+        liveBoundsValid_ = false;
+        generationSeed_ = nextGeneration(generationSeed_);
     }
 
     size_t objectCount() const { return objectCount_; }
@@ -193,20 +219,36 @@ public:
         return nodes_;
     }
 
+    // Returns stable object IDs in Morton-code order. Incremental edits keep
+    // the tree queryable, but can leave the backing index array out of order;
+    // this accessor repairs that order and relinks leaves without rebuilding.
+    const std::vector<ObjectId>& sortedIds() const {
+        ensureBuilt();
+        if (mortonOrderDirty_) sortIdsByMortonAndRelinkLeaves();
+        syncSortedObjectIdCache();
+        return sortedObjectIdsCache_;
+    }
+
     void rebuild() const {
         nodes_.clear();
         sortedIds_.clear();
+        sortedObjectIdsCache_.clear();
         parents_.clear();
         leafForObject_.assign(objects_.size(), -1);
         pendingRefitLeaves_.clear();
         pendingRefitLeafSet_.clear();
         refitDirty_ = false;
-        incrementalEditCount_ = 0;
+        incrementalInsertCount_ = 0;
+        incrementalRefitCount_ = 0;
+        deadLeafCount_ = 0;
         unqueriedInsertCount_ = 0;
-        lastRebuildRootArea_ = 0.0f;
+        mortonOrderDirty_ = false;
+        sortedObjectIdsCacheDirty_ = true;
 
         if (objectCount_ == 0) {
             dirty_ = false;
+            liveBounds_ = AABB{};
+            liveBoundsValid_ = false;
             return;
         }
         if (objectCount_ > static_cast<size_t>(std::numeric_limits<int>::max() / 2)) {
@@ -226,13 +268,16 @@ public:
             const Vec3 c = boundsCenter(obj.bounds);
             if (first) {
                 centroidBounds = {c, c};
+                liveBounds_ = obj.bounds;
                 first = false;
             } else {
                 centroidBounds.min = vmin(centroidBounds.min, c);
                 centroidBounds.max = vmax(centroidBounds.max, c);
+                liveBounds_ = unite(liveBounds_, obj.bounds);
             }
             refs.push_back({index, obj.bounds, c, 0});
         }
+        liveBoundsValid_ = !first;
 
         for (BuildRef& ref : refs) ref.code = mortonCode(ref.centroid, centroidBounds);
         std::sort(refs.begin(), refs.end(), [](const BuildRef& a, const BuildRef& b) {
@@ -249,7 +294,6 @@ public:
         buildRecursive(0, 0, refs.size(), refs, nextNode, -1);
         nodes_.resize(static_cast<size_t>(nextNode));
         parents_.resize(static_cast<size_t>(nextNode));
-        lastRebuildRootArea_ = surfaceArea(nodes_[0].bounds);
         dirty_ = false;
     }
 
@@ -276,7 +320,8 @@ public:
             if (!boundsOverlap(node.bounds, region)) continue;
 
             if (node.leaf()) {
-                out.push_back(objectIdForIndex(sortedIds_[node.start]));
+                const ObjectIndex index = liveIndexForLeaf(node);
+                if (index != kInvalidIndex) out.push_back(objectIdForIndex(index));
             } else {
                 stack.push_back(node.right);
                 stack.push_back(node.left);
@@ -308,7 +353,8 @@ public:
             if (!aabbOverlapsSphere(node.bounds, center, radiusSq)) continue;
 
             if (node.leaf()) {
-                out.push_back(objectIdForIndex(sortedIds_[node.start]));
+                const ObjectIndex index = liveIndexForLeaf(node);
+                if (index != kInvalidIndex) out.push_back(objectIdForIndex(index));
             } else {
                 stack.push_back(node.right);
                 stack.push_back(node.left);
@@ -400,7 +446,8 @@ public:
 
             const Node& node = nodes_[static_cast<size_t>(entry.node)];
             if (node.leaf()) {
-                const ObjectIndex index = sortedIds_[node.start];
+                const ObjectIndex index = liveIndexForLeaf(node);
+                if (index == kInvalidIndex) continue;
                 const Object& obj = objects_[index].object;
                 float t = 0.0f;
                 if (obj.collider->raycast(origin, d, best.t, t) &&
@@ -446,7 +493,7 @@ private:
 
     struct ObjectSlot {
         Object object;
-        uint32_t generation = 1;
+        uint32_t generation = 0;
         bool alive = false;
     };
 
@@ -504,7 +551,7 @@ private:
 
         ObjectSlot& slot = objects_[index];
         if (slot.generation == 0u) {
-            slot.generation = 1u;
+            slot.generation = generationSeed_;
         }
         slot.object = std::move(obj);
         slot.alive = true;
@@ -560,6 +607,16 @@ private:
         if (index == kInvalidIndex || index >= objects_.size()) return kInvalid;
         const ObjectSlot& slot = objects_[index];
         return slot.alive ? makeObjectId(index, slot.generation) : kInvalid;
+    }
+
+    bool liveObjectIndex(ObjectIndex index) const {
+        return index != kInvalidIndex && index < objects_.size() && objects_[index].alive;
+    }
+
+    ObjectIndex liveIndexForLeaf(const Node& leaf) const {
+        if (!leaf.leaf() || leaf.dead || leaf.start >= sortedIds_.size()) return kInvalidIndex;
+        const ObjectIndex index = sortedIds_[leaf.start];
+        return liveObjectIndex(index) ? index : kInvalidIndex;
     }
 
     static bool prepareCollider(const Collider& collider, AABB& bounds) {
@@ -667,14 +724,29 @@ private:
             return;
         }
         if (refitDirty_) {
-            if (shouldRebuildForEditCount()) {
-                rebuild();
-                return;
-            }
             refitPending();
             if (shouldRebuildAfterIncrementalEdits()) rebuild();
         }
         unqueriedInsertCount_ = 0;
+    }
+
+    void clearTreeStorage() {
+        nodes_.clear();
+        sortedIds_.clear();
+        sortedObjectIdsCache_.clear();
+        parents_.clear();
+        leafForObject_.assign(objects_.size(), -1);
+        pendingRefitLeaves_.clear();
+        pendingRefitLeafSet_.clear();
+        dirty_ = false;
+        refitDirty_ = false;
+        incrementalInsertCount_ = 0;
+        incrementalRefitCount_ = 0;
+        deadLeafCount_ = 0;
+        unqueriedInsertCount_ = 0;
+        mortonOrderDirty_ = false;
+        liveBounds_ = AABB{};
+        liveBoundsValid_ = false;
     }
 
     int buildRecursive(int nodeIdx, size_t start, size_t end,
@@ -689,6 +761,7 @@ private:
             node.bounds = refs[start].bounds;
             node.left = -1;
             node.right = -1;
+            node.dead = false;
             leafForObject_[refs[start].id] = nodeIdx;
             return nodeIdx;
         }
@@ -698,6 +771,7 @@ private:
         const int rightIdx = nextNode++;
         node.left = leftIdx;
         node.right = rightIdx;
+        node.dead = false;
 
         buildRecursive(leftIdx, start, split + 1, refs, nextNode, nodeIdx);
         buildRecursive(rightIdx, split + 1, end, refs, nextNode, nodeIdx);
@@ -710,19 +784,31 @@ private:
 
     void markInserted(ObjectIndex id, const AABB& bounds) {
         ++unqueriedInsertCount_;
+        sortedObjectIdsCacheDirty_ = true;
+
+        if (!liveBoundsValid_) {
+            liveBounds_ = bounds;
+            liveBoundsValid_ = true;
+        } else {
+            liveBounds_ = unite(liveBounds_, bounds);
+        }
+
         if (!dirty_ && shouldDeferUnqueriedInserts()) {
             markDirtyForRebuild();
             return;
         }
 
         if (!dirty_ && refitDirty_) {
-            refitPending();
-            if (shouldRebuildAfterIncrementalEdits()) markDirtyForRebuild();
+            if (shouldRebuildAfterIncrementalEdits()) {
+                markDirtyForRebuild();
+            } else {
+                refitPending();
+            }
         }
 
         if (canInsertIncrementally()) {
             insertLeafIncremental(id, bounds);
-            ++incrementalEditCount_;
+            ++incrementalInsertCount_;
             if (shouldRebuildAfterIncrementalEdits()) markDirtyForRebuild();
         } else {
             markDirtyForRebuild();
@@ -730,22 +816,27 @@ private:
     }
 
     void markUpdated(ObjectIndex id, const AABB& bounds) {
-        if (!dirty_ && parents_.size() == nodes_.size() &&
-            sortedIds_.size() == objectCount_ &&
-            leafForObject_.size() == objects_.size() &&
-            id < leafForObject_.size()) {
-            const int leafIdx = leafForObject_[id];
-            if (leafIdx >= 0 && static_cast<size_t>(leafIdx) < nodes_.size()) {
-                nodes_[static_cast<size_t>(leafIdx)].bounds = bounds;
-                if (pendingRefitLeafSet_.insert(leafIdx).second) {
-                    pendingRefitLeaves_.push_back(leafIdx);
-                }
-                refitDirty_ = true;
-                ++incrementalEditCount_;
-                return;
-            }
+        sortedObjectIdsCacheDirty_ = true;
+
+        // Conservative: only grow liveBounds_, never shrink. If the object
+        // moved inward the live-bounds union stays stale, which only makes the
+        // area quality check more lenient until the next rebuild.
+        if (liveBoundsValid_) {
+            liveBounds_ = unite(liveBounds_, bounds);
         }
-        markDirtyForRebuild();
+
+        if (canUpdateIncrementally(id)) {
+            const int leafIdx = leafForObject_[id];
+            nodes_[static_cast<size_t>(leafIdx)].bounds = bounds;
+            if (pendingRefitLeafSet_.insert(leafIdx).second) {
+                pendingRefitLeaves_.push_back(leafIdx);
+            }
+            refitDirty_ = true;
+            mortonOrderDirty_ = true;
+            ++incrementalRefitCount_;
+        } else {
+            markDirtyForRebuild();
+        }
     }
 
     void markDirtyForRebuild() {
@@ -759,7 +850,64 @@ private:
         return !dirty_ && !refitDirty_ && !nodes_.empty() &&
                parents_.size() == nodes_.size() &&
                leafForObject_.size() == objects_.size() &&
-               sortedIds_.size() + 1 == objectCount_;
+               sortedIds_.size() + 1 == objectCount_ + deadLeafCount_;
+    }
+
+    bool canUpdateIncrementally(ObjectIndex id) const {
+        // Pending refits do not block more updates: each update overwrites the
+        // leaf bounds, and one later refit repairs the accumulated ancestors.
+        return !dirty_ && parents_.size() == nodes_.size() &&
+               sortedIds_.size() == objectCount_ + deadLeafCount_ &&
+               leafForObject_.size() == objects_.size() &&
+               id < leafForObject_.size() &&
+               leafForObject_[id] >= 0 &&
+               static_cast<size_t>(leafForObject_[id]) < nodes_.size() &&
+               nodes_[static_cast<size_t>(leafForObject_[id])].leaf() &&
+               !nodes_[static_cast<size_t>(leafForObject_[id])].dead;
+    }
+
+    bool canRemoveIncrementally(ObjectIndex id) const {
+        return !dirty_ && !refitDirty_ && !nodes_.empty() &&
+               parents_.size() == nodes_.size() &&
+               sortedIds_.size() == objectCount_ + deadLeafCount_ &&
+               leafForObject_.size() == objects_.size() &&
+               id < leafForObject_.size() &&
+               leafForObject_[id] >= 0 &&
+               static_cast<size_t>(leafForObject_[id]) < nodes_.size() &&
+               nodes_[static_cast<size_t>(leafForObject_[id])].leaf() &&
+               !nodes_[static_cast<size_t>(leafForObject_[id])].dead;
+    }
+
+    void tombstoneLeaf(int leafIdx) {
+        if (leafIdx < 0 || static_cast<size_t>(leafIdx) >= nodes_.size()) {
+            markDirtyForRebuild();
+            return;
+        }
+
+        Node& leaf = nodes_[static_cast<size_t>(leafIdx)];
+        if (!leaf.leaf() || leaf.dead) {
+            markDirtyForRebuild();
+            return;
+        }
+
+        if (leaf.start < sortedIds_.size()) sortedIds_[leaf.start] = kInvalidIndex;
+        leaf.dead = true;
+        leaf.bounds = tombstoneBounds(leafIdx);
+        ++deadLeafCount_;
+        refitAncestors(leafIdx);
+        sortedObjectIdsCacheDirty_ = true;
+    }
+
+    AABB tombstoneBounds(int leafIdx) const {
+        const int parentIdx = parents_[static_cast<size_t>(leafIdx)];
+        if (parentIdx < 0) return nodes_[static_cast<size_t>(leafIdx)].bounds;
+
+        const Node& parent = nodes_[static_cast<size_t>(parentIdx)];
+        const int siblingIdx = parent.left == leafIdx ? parent.right : parent.left;
+        if (siblingIdx >= 0 && static_cast<size_t>(siblingIdx) < nodes_.size()) {
+            return nodes_[static_cast<size_t>(siblingIdx)].bounds;
+        }
+        return nodes_[static_cast<size_t>(leafIdx)].bounds;
     }
 
     void insertLeafIncremental(ObjectIndex id, const AABB& bounds) {
@@ -796,6 +944,7 @@ private:
             root.bounds = unite(nodes_[static_cast<size_t>(oldRootIdx)].bounds, bounds);
             nodes_[0] = root;
             parents_[0] = -1;
+            mortonOrderDirty_ = true;
             return;
         }
 
@@ -828,17 +977,160 @@ private:
         parents_[static_cast<size_t>(siblingIdx)] = parentIdx;
         parents_[static_cast<size_t>(leafIdx)] = parentIdx;
         refitAncestors(parentIdx);
+        mortonOrderDirty_ = true;
     }
 
     void rebindMovedNode(int nodeIdx) {
         Node& node = nodes_[static_cast<size_t>(nodeIdx)];
         if (node.leaf()) {
+            if (node.dead) return;
             assert(node.start < sortedIds_.size());
-            leafForObject_[sortedIds_[node.start]] = nodeIdx;
+            const ObjectIndex index = sortedIds_[node.start];
+            if (index < leafForObject_.size()) leafForObject_[index] = nodeIdx;
             return;
         }
         parents_[static_cast<size_t>(node.left)] = nodeIdx;
         parents_[static_cast<size_t>(node.right)] = nodeIdx;
+    }
+
+    void sortIdsByMortonAndRelinkLeaves() const {
+        if (!mortonOrderDirty_) return;
+        if (objectCount_ == 0) {
+            sortedIds_.clear();
+            sortedObjectIdsCache_.clear();
+            mortonOrderDirty_ = false;
+            sortedObjectIdsCacheDirty_ = false;
+            return;
+        }
+        if (dirty_ || sortedIds_.size() < objectCount_ ||
+            leafForObject_.size() != objects_.size()) {
+            rebuild();
+            return;
+        }
+
+        AABB centroidBounds;
+        if (!computeCentroidBounds(centroidBounds)) {
+            mortonOrderDirty_ = false;
+            return;
+        }
+
+        std::vector<BuildRef> refs;
+        refs.reserve(objectCount_);
+        for (ObjectIndex index = 0; index < objects_.size(); ++index) {
+            if (!objects_[index].alive) continue;
+            if (index >= leafForObject_.size()) {
+                rebuild();
+                return;
+            }
+            const int leafIdx = leafForObject_[index];
+            if (leafIdx < 0 || static_cast<size_t>(leafIdx) >= nodes_.size() ||
+                nodes_[static_cast<size_t>(leafIdx)].dead) {
+                rebuild();
+                return;
+            }
+            const Object& obj = objects_[index].object;
+            const Vec3 centroid = boundsCenter(obj.bounds);
+            refs.push_back({index, obj.bounds, centroid,
+                            mortonCode(centroid, centroidBounds)});
+        }
+        std::sort(refs.begin(), refs.end(), [](const BuildRef& a, const BuildRef& b) {
+            if (a.code != b.code) return a.code < b.code;
+            return a.id < b.id;
+        });
+
+        for (size_t i = 0; i < refs.size(); ++i) {
+            sortedIds_[i] = refs[i].id;
+            const int leafIdx = leafForObject_[refs[i].id];
+            Node& leaf = nodes_[static_cast<size_t>(leafIdx)];
+            if (!leaf.leaf() || leaf.dead) {
+                rebuild();
+                return;
+            }
+            leaf.start = i;
+            leaf.end = i + 1;
+        }
+        for (size_t i = refs.size(); i < sortedIds_.size(); ++i) {
+            sortedIds_[i] = kInvalidIndex;
+        }
+
+        refitAllInternalNodes();
+        mortonOrderDirty_ = false;
+        sortedObjectIdsCacheDirty_ = true;
+    }
+
+    void syncSortedObjectIdCache() const {
+        if (!sortedObjectIdsCacheDirty_ &&
+            sortedObjectIdsCache_.size() == objectCount_) {
+            return;
+        }
+
+        sortedObjectIdsCache_.clear();
+        sortedObjectIdsCache_.reserve(objectCount_);
+        for (ObjectIndex index : sortedIds_) {
+            const ObjectId id = objectIdForIndex(index);
+            if (id != kInvalid) sortedObjectIdsCache_.push_back(id);
+        }
+        sortedObjectIdsCacheDirty_ = false;
+    }
+
+    bool computeCentroidBounds(AABB& centroidBounds) const {
+        bool first = true;
+        for (const ObjectSlot& slot : objects_) {
+            if (!slot.alive) continue;
+
+            const Vec3 c = boundsCenter(slot.object.bounds);
+            if (first) {
+                centroidBounds = {c, c};
+                first = false;
+            } else {
+                centroidBounds.min = vmin(centroidBounds.min, c);
+                centroidBounds.max = vmax(centroidBounds.max, c);
+            }
+        }
+        return !first;
+    }
+
+    bool computeLiveBounds(AABB& bounds) const {
+        bool first = true;
+        for (const ObjectSlot& slot : objects_) {
+            if (!slot.alive) continue;
+
+            if (first) {
+                bounds = slot.object.bounds;
+                first = false;
+            } else {
+                bounds = unite(bounds, slot.object.bounds);
+            }
+        }
+        return !first;
+    }
+
+    void refitAllInternalNodes() const {
+        if (nodes_.empty()) return;
+
+        std::vector<std::pair<int, bool>> stack;
+        stack.reserve(nodes_.size());
+        stack.push_back({0, false});
+        while (!stack.empty()) {
+            const auto entry = stack.back();
+            stack.pop_back();
+
+            Node& node = nodes_[static_cast<size_t>(entry.first)];
+            if (node.leaf()) continue;
+
+            if (!entry.second) {
+                stack.push_back({entry.first, true});
+                stack.push_back({node.right, false});
+                stack.push_back({node.left, false});
+                continue;
+            }
+
+            const Node& left = nodes_[static_cast<size_t>(node.left)];
+            const Node& right = nodes_[static_cast<size_t>(node.right)];
+            node.bounds = unite(left.bounds, right.bounds);
+            node.start = std::min(left.start, right.start);
+            node.end = std::max(left.end, right.end);
+        }
     }
 
     int chooseInsertionSibling(const AABB& bounds) const {
@@ -906,26 +1198,47 @@ private:
 
         if (shouldRebuildForEditCount()) return true;
 
-        const float rootArea = surfaceArea(nodes_[0].bounds);
-        if (lastRebuildRootArea_ > 0.0f && rootArea > lastRebuildRootArea_ * 3.0f) {
-            return true;
-        }
+        if (rootAreaExceedsLiveBounds()) return true;
 
-        if ((incrementalEditCount_ & size_t{15}) != 0) return false;
+        const size_t qualityCheckCount = incrementalInsertCount_ +
+                                         incrementalRefitCount_ +
+                                         deadLeafCount_;
+        if ((qualityCheckCount & size_t{15}) != 0) return false;
         const size_t depthLimit = maxAllowedDepth(objectCount_);
         return maxTreeDepth(0) > depthLimit;
     }
 
     bool shouldRebuildForEditCount() const {
         if (objectCount_ == 0 || nodes_.empty()) return false;
-        const size_t editLimit = std::max<size_t>(size_t{64}, objectCount_ / 2);
-        return incrementalEditCount_ >= editLimit;
+        const size_t insertLimit = std::max<size_t>(size_t{64}, objectCount_ / 4);
+        return incrementalInsertCount_ >= insertLimit;
+    }
+
+    bool shouldRebuildForDeadLeaves() const {
+        if (deadLeafCount_ == 0 || sortedIds_.empty()) return false;
+        const size_t deadLimit = std::max<size_t>(size_t{64}, objectCount_ / 8);
+        return deadLeafCount_ >= deadLimit ||
+               deadLeafCount_ * 2 >= sortedIds_.size();
     }
 
     bool shouldDeferUnqueriedInserts() const {
         // After a sustained append burst, let the next read rebuild once
         // instead of paying dynamic-tree insertion cost for every object.
-        return !nodes_.empty() && unqueriedInsertCount_ >= kDeferredInsertBatchThreshold;
+        const size_t threshold = std::max<size_t>(size_t{64}, objectCount_ / 16);
+        return !nodes_.empty() && unqueriedInsertCount_ >= threshold;
+    }
+
+    bool rootAreaExceedsLiveBounds() const {
+        if (!liveBoundsValid_) {
+            if (!computeLiveBounds(liveBounds_)) return false;
+            liveBoundsValid_ = true;
+        }
+
+        const float liveArea = surfaceArea(liveBounds_);
+        if (!(liveArea > 0.0f)) return false;
+
+        const float rootArea = surfaceArea(nodes_[0].bounds);
+        return rootArea > liveArea * 1.05f;
     }
 
     static size_t maxAllowedDepth(size_t objectCount) {
@@ -1050,6 +1363,7 @@ private:
         static_assert(std::is_same_v<Id, ObjectIndex> || std::is_same_v<Id, ObjectId>,
                       "LinearBVH pair output ids must be ObjectIndex or ObjectId");
         if (idA == idB) return;
+        if (!liveObjectIndex(idA) || !liveObjectIndex(idB)) return;
         if (idA > idB) std::swap(idA, idB);
 
         if constexpr (std::is_same_v<Id, ObjectId>) {
@@ -1066,6 +1380,7 @@ private:
                          ObjectIndex idB) const {
         static_assert(std::is_same_v<Id, ObjectIndex> || std::is_same_v<Id, ObjectId>,
                       "LinearBVH pair output ids must be ObjectIndex or ObjectId");
+        if (!liveObjectIndex(idA) || !other.liveObjectIndex(idB)) return;
         if constexpr (std::is_same_v<Id, ObjectId>) {
             out.emplace_back(objectIdForIndex(idA), other.objectIdForIndex(idB));
         } else {
@@ -1157,17 +1472,22 @@ private:
     size_t objectCount_ = 0;
     mutable std::vector<Node> nodes_;
     mutable std::vector<ObjectIndex> sortedIds_;
+    mutable std::vector<ObjectId> sortedObjectIdsCache_;
     mutable std::vector<int> parents_;
     mutable std::vector<int> leafForObject_;
     mutable std::vector<int> pendingRefitLeaves_;
     mutable DenseSet<int> pendingRefitLeafSet_;
     mutable bool dirty_ = false;
     mutable bool refitDirty_ = false;
-    mutable size_t incrementalEditCount_ = 0;
+    mutable size_t incrementalInsertCount_ = 0;
+    mutable size_t incrementalRefitCount_ = 0;
+    mutable size_t deadLeafCount_ = 0;
     mutable size_t unqueriedInsertCount_ = 0;
-    mutable float lastRebuildRootArea_ = 0.0f;
-
-    static constexpr size_t kDeferredInsertBatchThreshold = 64;
+    mutable bool mortonOrderDirty_ = false;
+    mutable bool sortedObjectIdsCacheDirty_ = false;
+    mutable AABB liveBounds_{};
+    mutable bool liveBoundsValid_ = false;
+    uint32_t generationSeed_ = 1;
 };
 
 }  // namespace utils
