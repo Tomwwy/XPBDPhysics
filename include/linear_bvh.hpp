@@ -7,6 +7,7 @@
 //   - AABB / sphere overlap queries
 //   - self-overlap pair extraction
 //   - raycast with narrowphase fallback (Collider::raycast)
+//   - AABB-only raycast with callback (early-out for external narrowphase)
 //   - incremental insert / update / remove with lazy rebuild
 #ifndef UTILS_LINEAR_BVH_HPP
 #define UTILS_LINEAR_BVH_HPP
@@ -55,6 +56,11 @@ public:
 
     struct RayHit {
         bool hit = false;
+        ObjectId id = kInvalid;
+        float t = 0.0f;
+    };
+
+    struct AABBRayHit {
         ObjectId id = kInvalid;
         float t = 0.0f;
     };
@@ -518,6 +524,95 @@ public:
             }
         }
         return best.hit ? best : RayHit{};
+    }
+
+    // --- AABB-only raycast -------------------------------------------------
+    // Primary interface: callback-based traversal. Walks the BVH in
+    // approximate front-to-back order and calls `callback(id, tEntry)` for
+    // each leaf whose AABB is intersected by the ray. If the callback returns
+    // true, traversal stops immediately — this is the recommended path for
+    // combining with an external narrowphase: call your narrowphase inside
+    // the callback and return true on the first success. Proxies participate
+    // (they carry AABBs but no Collider).
+    //
+    //   bool myNarrowphase(ObjectId id, float aabbT) { ... }
+    //   bvh.raycastAABB(origin, dir, [&](ObjectId id, float t) {
+    //       return myNarrowphase(id, t);
+    //   }, maxDist);
+    template <typename F,
+              std::enable_if_t<std::is_invocable_r_v<bool, F, ObjectId, float>, int> = 0>
+    void raycastAABB(const Vec3& origin, const Vec3& dir,
+                     F&& callback, float maxDist = 1e6f) const {
+        if (objectCount_ == 0 || maxDist < 0.0f) return;
+
+        Vec3 d = dir;
+        const float dlen = length(d);
+        if (dlen <= 0.0f) return;
+        d = d / dlen;
+
+        ensureBuilt();
+
+        static thread_local std::vector<StackEntry> stack;
+        prepareScratchStack(stack);
+
+        float rootT = 0.0f;
+        if (!intersectNode(0, origin, d, maxDist, rootT)) return;
+        stack.push_back({0, rootT});
+
+        while (!stack.empty()) {
+            StackEntry entry = stack.back();
+            stack.pop_back();
+            if (entry.t > maxDist) continue;
+
+            const Node& node = nodes_[static_cast<size_t>(entry.node)];
+            if (node.leaf()) {
+                const ObjectIndex index = liveIndexForLeaf(node);
+                if (index != kInvalidIndex) {
+                    if (callback(objectIdForIndex(index), entry.t)) return;
+                }
+                continue;
+            }
+
+            float tLeft = 0.0f;
+            float tRight = 0.0f;
+            const bool hitLeft = intersectNode(node.left, origin, d, maxDist, tLeft);
+            const bool hitRight = intersectNode(node.right, origin, d, maxDist, tRight);
+            if (hitLeft && hitRight) {
+                if (tLeft <= tRight) {
+                    stack.push_back({node.right, tRight});
+                    stack.push_back({node.left, tLeft});
+                } else {
+                    stack.push_back({node.left, tLeft});
+                    stack.push_back({node.right, tRight});
+                }
+            } else if (hitLeft) {
+                stack.push_back({node.left, tLeft});
+            } else if (hitRight) {
+                stack.push_back({node.right, tRight});
+            }
+        }
+    }
+
+    // Collect all AABB hits into an existing vector (unsorted — sort by
+    // `.t` if needed). Built on the callback version above.
+    void raycastAABB(const Vec3& origin, const Vec3& dir,
+                     std::vector<AABBRayHit>& out,
+                     float maxDist = 1e6f) const {
+        out.clear();
+        raycastAABB(origin, dir, [&out](ObjectId id, float t) {
+            out.push_back({id, t});
+            return false;
+        }, maxDist);
+    }
+
+    // Convenience: return all AABB hits sorted by entry distance.
+    std::vector<AABBRayHit> raycastAABB(const Vec3& origin, const Vec3& dir,
+                                         float maxDist = 1e6f) const {
+        std::vector<AABBRayHit> out;
+        raycastAABB(origin, dir, out, maxDist);
+        std::sort(out.begin(), out.end(),
+                  [](const AABBRayHit& a, const AABBRayHit& b) { return a.t < b.t; });
+        return out;
     }
 
     static constexpr uint64_t morton3D64(uint32_t x, uint32_t y, uint32_t z) {
