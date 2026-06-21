@@ -13,15 +13,21 @@ Next up (tracked in DESIGN.md):
 
 
 
-- split narrow phase solver to different files, e.g. GJK, sphere vs sphere, sphere vs tetrahedron etc. 
+- split narrow phase solver to different files, e.g. GJK, sphere vs sphere, sphere vs tetrahedron etc. — DONE
+  (`include/xpbd/narrowphase/`: `contact.hpp` canonical result, `sphere_sphere.hpp`
+  cell, `narrowphase.hpp` dispatch-matrix umbrella; new cells/GJK slot in here.)
 
 
-- Maybe turn functions like colliderWorldSphere/colliderIsActiveAndIsSphere/computeColliderWorldSphere to function template to check if valid and return world space shapes? 
+- Maybe turn functions like colliderWorldSphere/colliderIsActiveAndIsSphere/computeColliderWorldSphere to function template to check if valid and return world space shapes? — DONE
+  (`include/xpbd/colliders/world_shape.hpp`: `BodyTransform` + `WorldShapeTraits<ShapeType>`;
+  `XPBDWorld::worldShape<T>()` returns `std::optional<WorldType>`. `BodyTransform::apply`
+  is the single hook that becomes a full rigid transform when orientation lands.)
 
 
-#### 6. `colliderWorldSphere` is sphere-specific but named generically
+#### 6. `colliderWorldSphere` is sphere-specific but named generically — RESOLVED
 
-**`include/xpbd/xpbd_world.hpp:68`** — The function name and signature suggest it computes a world-space collider bounding volume, but it hardcodes `shape.sphere` access. When Box/Capsule are added, this API will need to become either a tagged-union dispatch or a virtual method. Consider renaming it or making it dispatch on shape type now.
+Replaced by the templated `worldShape<T>()` + `WorldShapeTraits` above; adding a
+shape is a trait specialization, not an edit to the world.
 
 #### 7. `alive()` in TypedStore doesn't check the `alive_[]` flag
 

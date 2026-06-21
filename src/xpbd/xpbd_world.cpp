@@ -1,6 +1,7 @@
 #include "xpbd/xpbd_world.hpp"
 
 #include "utils/shapes.hpp"
+#include "xpbd/narrowphase/narrowphase.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -135,32 +136,6 @@ const Collider* XPBDWorld::collider(Entity entity) const
     return entity.type() == EntityType::Collider ? colliders_.get(entity) : nullptr;
 }
 
-bool XPBDWorld::colliderIsActiveAndIsSphere(Entity entity) const
-{
-    const Collider* c = collider(entity);
-    if (c == nullptr || !c->enabled || c->shape.type != ShapeType::Sphere) {
-        return false;
-    }
-    if (c->body.valid() && particle(c->body) == nullptr) {
-        return false;  // body died; proxy will be reaped next refresh
-    }
-    return c->shape.sphere.radius > 0.0f;
-}
-
-void XPBDWorld::computeColliderWorldSphere(const Collider& collider,
-                                           Vec3& center,
-                                           float& radius) const
-{
-    Vec3 origin = collider.offset;
-    if (collider.body.valid()) {
-        const Particle* body = particle(collider.body);
-        // body must be non-null: caller verified via colliderIsActiveAndIsSphere()
-        origin = body->position + collider.offset;
-    }
-    center = origin + collider.shape.sphere.center;
-    radius = collider.shape.sphere.radius;
-}
-
 bool XPBDWorld::setColliderFilter(Entity entity,
                                   CollisionLayerMask layer,
                                   CollisionLayerMask mask)
@@ -264,7 +239,8 @@ void XPBDWorld::refreshBroadphase()
 
     colliders_.forEachAlive(EntityType::Collider,
                             [this, &collidersToDestroy](Entity entity, Collider& collider) {
-        if (!colliderIsActiveAndIsSphere(entity)) {
+        const std::optional<WorldSphere> sphere = worldShape<ShapeType::Sphere>(collider);
+        if (!sphere) {
             removeColliderProxy(collider);
             // mark destroy because collider body is gone
             if (collider.body.valid() && particle(collider.body) == nullptr) {
@@ -273,10 +249,7 @@ void XPBDWorld::refreshBroadphase()
             return;
         }
 
-        Vec3 center;
-        float radius = 0.0f;
-        computeColliderWorldSphere(collider, center, radius);
-        const utils::AABB bounds = utils::AABB::fromCenterRadius(center, radius);
+        const utils::AABB bounds = utils::AABB::fromCenterRadius(sphere->center, sphere->radius);
         utils::LinearBVH& bvh = broadphase(collider.partition);
         if (collider.proxy == utils::LinearBVH::kInvalid) {
             collider.proxy = bvh.insertProxy(bounds, entity.value);
@@ -344,25 +317,20 @@ void XPBDWorld::generateContacts(float dt)
             return;
         }
 
-        if (!colliderIsActiveAndIsSphere(entityA) || !colliderIsActiveAndIsSphere(entityB)) {
+        const std::optional<WorldSphere> sphereA = worldShape<ShapeType::Sphere>(*colliderA);
+        const std::optional<WorldSphere> sphereB = worldShape<ShapeType::Sphere>(*colliderB);
+        if (!sphereA || !sphereB) {
             return;
         }
 
-        Vec3 centerA;
-        Vec3 centerB;
-        float radiusA = 0.0f;
-        float radiusB = 0.0f;
-        computeColliderWorldSphere(*colliderA, centerA, radiusA);
-        computeColliderWorldSphere(*colliderB, centerB, radiusB);
-
-        const float minDistance = radiusA + radiusB;
-        if (!(minDistance > 0.0f)) {
-            return;
-        }
-
-        const Vec3 delta = centerB - centerA;
-        const float distSq = lengthSq(delta);
-        if (distSq >= minDistance * minDistance) {
+        // Coincident centers have no defined separating axis; pick a
+        // deterministic one from the entity ids so the contact is stable.
+        const std::uint32_t hash = entityA.index() * 73856093u ^ entityB.index() * 19349663u;
+        static const Vec3 kFallbackAxes[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0},
+                                              {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+        const Contact hit =
+            narrowphase::sphereSphere(*sphereA, *sphereB, kFallbackAxes[hash % 6u]);
+        if (!hit.touching) {
             return;  // broadphase candidate, but not actually touching
         }
 
@@ -373,15 +341,7 @@ void XPBDWorld::generateContacts(float dt)
         contact.bodyB = colliderB->body;
         contact.compliance = contactCompliance_;
         contact.lambda = 0.0f;
-        if (distSq > 1e-12f) {
-            contact.normal = delta / std::sqrt(distSq);
-        } else {
-            // Coincident centers: deterministic fallback axis from entity ids.
-            const std::uint32_t hash = entityA.index() * 73856093u ^ entityB.index() * 19349663u;
-            static const Vec3 axes[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0},
-                                         {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
-            contact.normal = axes[hash % 6u];
-        }
+        contact.normal = hit.normal;
         contacts_.push_back(contact);
     };
 
@@ -434,15 +394,14 @@ void XPBDWorld::solveContacts(float dt)
             continue;
         }
 
-        Vec3 centerA;
-        Vec3 centerB;
-        float radiusA = 0.0f;
-        float radiusB = 0.0f;
-        computeColliderWorldSphere(*colA, centerA, radiusA);
-        computeColliderWorldSphere(*colB, centerB, radiusB);
+        const std::optional<WorldSphere> sphereA = worldShape<ShapeType::Sphere>(*colA);
+        const std::optional<WorldSphere> sphereB = worldShape<ShapeType::Sphere>(*colB);
+        if (!sphereA || !sphereB) {
+            continue;
+        }
 
-        const float minDistance = radiusA + radiusB;
-        const float separation = dot(centerB - centerA, contact.normal);
+        const float minDistance = sphereA->radius + sphereB->radius;
+        const float separation = dot(sphereB->center - sphereA->center, contact.normal);
         const float c = separation - minDistance;  // <0 when penetrating
         if (c >= 0.0f) {
             continue;

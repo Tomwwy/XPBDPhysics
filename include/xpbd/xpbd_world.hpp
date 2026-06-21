@@ -5,6 +5,7 @@
 #include "utils/shapes.hpp"
 #include "xpbd/broadphase_partition.hpp"
 #include "xpbd/colliders/collider.hpp"
+#include "xpbd/colliders/world_shape.hpp"
 #include "xpbd/constraints/contact_constraint.hpp"
 #include "xpbd/constraints/distance_constraint.hpp"
 #include "xpbd/entity.hpp"
@@ -16,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -63,15 +65,44 @@ public:
     Collider* collider(Entity entity);
     const Collider* collider(Entity entity) const;
 
-    // Returns true if the collider is in a usable state (exists, enabled,
-    // sphere shape, body alive if body-attached, radius > 0).
-    bool colliderIsActiveAndIsSphere(Entity entity) const;
+    // Resolve a collider's local shape into its world-space form (e.g.
+    // WorldSphere), or std::nullopt if the collider can't currently collide:
+    // missing/disabled, wrong shape type, dead body, or degenerate geometry.
+    // This is the generic replacement for the old
+    // colliderIsActiveAndIsSphere + computeColliderWorldSphere pair; adding a
+    // shape means specializing WorldShapeTraits, not touching this method.
+    template <ShapeType T>
+    std::optional<typename WorldShapeTraits<T>::WorldType>
+    worldShape(const Collider& collider) const
+    {
+        using Traits = WorldShapeTraits<T>;
+        if (!collider.enabled || collider.shape.type != T) {
+            return std::nullopt;
+        }
+        BodyTransform xf;
+        if (collider.body.valid()) {
+            const Particle* body = particle(collider.body);
+            if (body == nullptr) {
+                return std::nullopt;  // body died; proxy reaped next refresh
+            }
+            xf.position = body->position;
+        }
+        if (!Traits::localValid(collider.shape)) {
+            return std::nullopt;
+        }
+        return Traits::toWorld(collider.shape, xf, collider.offset);
+    }
 
-    // Compute world-space center and radius of an active sphere collider.
-    // Caller must have verified via colliderIsActiveAndIsSphere().
-    void computeColliderWorldSphere(const Collider& collider,
-                                    Vec3& center,
-                                    float& radius) const;
+    // Same as above but resolving the collider entity first; std::nullopt if the
+    // entity isn't a live collider.
+    template <ShapeType T>
+    std::optional<typename WorldShapeTraits<T>::WorldType>
+    worldShape(Entity entity) const
+    {
+        const Collider* c = collider(entity);
+        return c != nullptr ? worldShape<T>(*c)
+                            : std::optional<typename WorldShapeTraits<T>::WorldType>{};
+    }
 
     bool setColliderFilter(Entity entity,
                            CollisionLayerMask layer,
