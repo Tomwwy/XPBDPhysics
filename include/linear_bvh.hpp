@@ -103,6 +103,9 @@ public:
         ObjectIndex index = kInvalidIndex;
         ObjectSlot* slot = slotFor(id, &index);
         if (slot == nullptr || !validObjectBounds(bounds)) return false;
+        assert(slot->object.collider == nullptr &&
+               "updateProxy() called on a collider object — use update*() instead");
+        if (slot->object.collider != nullptr) return false;
 
         slot->object.bounds = bounds;
         markUpdated(index, bounds);
@@ -527,20 +530,29 @@ public:
     }
 
     // --- AABB-only raycast -------------------------------------------------
-    // Primary interface: callback-based traversal. Walks the BVH in
-    // approximate front-to-back order and calls `callback(id, tEntry)` for
-    // each leaf whose AABB is intersected by the ray. If the callback returns
-    // true, traversal stops immediately — this is the recommended path for
-    // combining with an external narrowphase: call your narrowphase inside
-    // the callback and return true on the first success. Proxies participate
-    // (they carry AABBs but no Collider).
+    // Primary interface: callback-based traversal with progressive tightening.
+    // Walks the BVH in approximate front-to-back order and calls
+    // `callback(id, aabbT, bestT)` for each leaf whose AABB is intersected.
     //
-    //   bool myNarrowphase(ObjectId id, float aabbT) { ... }
-    //   bvh.raycastAABB(origin, dir, [&](ObjectId id, float t) {
-    //       return myNarrowphase(id, t);
+    // bestT is an in/out parameter — it starts at maxDist and can be lowered
+    // by the callback to prune the search, exactly like Collider::raycast().
+    //   - If your narrowphase finds a closer hit, write it to bestT.
+    //   - Return true to stop immediately, false to keep searching.
+    //   - The traversal uses bestT for both stack pruning and node intersection
+    //     tests, so the search radius tightens as closer hits are found.
+    //
+    // Proxies (collider == nullptr) are included — use this for ray queries
+    // against proxy objects or to plug in an external narrowphase.
+    //
+    //   bvh.raycastAABB(origin, dir, [&](ObjectId id, float aabbT, float& bestT) {
+    //       float hitT;
+    //       if (myNarrowphase(id, origin, dir, bestT, hitT)) {
+    //           if (hitT < bestT) bestT = hitT;
+    //       }
+    //       return false;  // continue searching for a closer hit
     //   }, maxDist);
     template <typename F,
-              std::enable_if_t<std::is_invocable_r_v<bool, F, ObjectId, float>, int> = 0>
+              std::enable_if_t<std::is_invocable_r_v<bool, F, ObjectId, float, float&>, int> = 0>
     void raycastAABB(const Vec3& origin, const Vec3& dir,
                      F&& callback, float maxDist = 1e6f) const {
         if (objectCount_ == 0 || maxDist < 0.0f) return;
@@ -555,28 +567,29 @@ public:
         static thread_local std::vector<StackEntry> stack;
         prepareScratchStack(stack);
 
+        float bestT = maxDist;
         float rootT = 0.0f;
-        if (!intersectNode(0, origin, d, maxDist, rootT)) return;
+        if (!intersectNode(0, origin, d, bestT, rootT)) return;
         stack.push_back({0, rootT});
 
         while (!stack.empty()) {
             StackEntry entry = stack.back();
             stack.pop_back();
-            if (entry.t > maxDist) continue;
+            if (entry.t > bestT) continue;
 
             const Node& node = nodes_[static_cast<size_t>(entry.node)];
             if (node.leaf()) {
                 const ObjectIndex index = liveIndexForLeaf(node);
                 if (index != kInvalidIndex) {
-                    if (callback(objectIdForIndex(index), entry.t)) return;
+                    if (callback(objectIdForIndex(index), entry.t, bestT)) return;
                 }
                 continue;
             }
 
             float tLeft = 0.0f;
             float tRight = 0.0f;
-            const bool hitLeft = intersectNode(node.left, origin, d, maxDist, tLeft);
-            const bool hitRight = intersectNode(node.right, origin, d, maxDist, tRight);
+            const bool hitLeft = intersectNode(node.left, origin, d, bestT, tLeft);
+            const bool hitRight = intersectNode(node.right, origin, d, bestT, tRight);
             if (hitLeft && hitRight) {
                 if (tLeft <= tRight) {
                     stack.push_back({node.right, tRight});
@@ -599,8 +612,8 @@ public:
                      std::vector<AABBRayHit>& out,
                      float maxDist = 1e6f) const {
         out.clear();
-        raycastAABB(origin, dir, [&out](ObjectId id, float t) {
-            out.push_back({id, t});
+        raycastAABB(origin, dir, [&out](ObjectId id, float aabbT, float& /*bestT*/) {
+            out.push_back({id, aabbT});
             return false;
         }, maxDist);
     }
