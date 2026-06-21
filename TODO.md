@@ -25,7 +25,10 @@ Next up (tracked in DESIGN.md):
 
 #### 4. Contact generation recomputes world-sphere positions wastefully
 
-`colliderWorldSphere()` is called for every collider in `refreshBroadphase()`, then AGAIN in `generateContacts()` for each candidate pair, then AGAIN per iteration in `solveContacts()`. The world-space sphere center and radius could be cached per-collider during `refreshBroadphase()` and reused. For ~750 particles with 4 substeps and 10 iterations, that's ~30,000 extra lookups per frame just for `solveContacts`.
+`colliderWorldSphere()` is called for every collider in `refreshBroadphase()`, then AGAIN in `generateContacts()` for each candidate pair, then AGAIN per iteration in `solveContacts()`. The world-space sphere center and radius could be cached per-collider during `refreshBroadphase()` and reused. For ~750 particles with 4 substeps and 10 iterations, that's ~30,000 extra lookups per frame just for `solveContacts`. (No, maybe they can't be cached, because constraints change the data like world position constantly? )
+
+Maybe turn functions like colliderWorldSphere/colliderIsActiveAndIsSphere/computeColliderWorldSphere to function template to return world space shapes? 
+
 
 #### 5. XPBD contacts lack warm starting
 

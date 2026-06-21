@@ -135,25 +135,30 @@ const Collider* XPBDWorld::collider(Entity entity) const
     return entity.type() == EntityType::Collider ? colliders_.get(entity) : nullptr;
 }
 
-bool XPBDWorld::colliderWorldSphere(Entity entity, Vec3& center, float& radius) const
+bool XPBDWorld::colliderIsActiveAndIsSphere(Entity entity) const
 {
     const Collider* c = collider(entity);
     if (c == nullptr || !c->enabled || c->shape.type != ShapeType::Sphere) {
         return false;
     }
-
-    Vec3 origin = c->offset;
-    if (c->body.valid()) {
-        const Particle* body = particle(c->body);
-        if (body == nullptr) {
-            return false;  // body died; proxy will be reaped next refresh
-        }
-        origin = body->position + c->offset;
+    if (c->body.valid() && particle(c->body) == nullptr) {
+        return false;  // body died; proxy will be reaped next refresh
     }
+    return c->shape.sphere.radius > 0.0f;
+}
 
-    center = origin + c->shape.sphere.center;
-    radius = c->shape.sphere.radius;
-    return radius > 0.0f;
+void XPBDWorld::computeColliderWorldSphere(const Collider& collider,
+                                           Vec3& center,
+                                           float& radius) const
+{
+    Vec3 origin = collider.offset;
+    if (collider.body.valid()) {
+        const Particle* body = particle(collider.body);
+        // body must be non-null: caller verified via colliderIsActiveAndIsSphere()
+        origin = body->position + collider.offset;
+    }
+    center = origin + collider.shape.sphere.center;
+    radius = collider.shape.sphere.radius;
 }
 
 bool XPBDWorld::setColliderFilter(Entity entity,
@@ -259,10 +264,7 @@ void XPBDWorld::refreshBroadphase()
 
     colliders_.forEachAlive(EntityType::Collider,
                             [this, &collidersToDestroy](Entity entity, Collider& collider) {
-        Vec3 center;
-        float radius = 0.0f;
-        const bool active = collider.enabled && colliderWorldSphere(entity, center, radius);
-        if (!active) {
+        if (!colliderIsActiveAndIsSphere(entity)) {
             removeColliderProxy(collider);
             // mark destroy because collider body is gone
             if (collider.body.valid() && particle(collider.body) == nullptr) {
@@ -271,6 +273,9 @@ void XPBDWorld::refreshBroadphase()
             return;
         }
 
+        Vec3 center;
+        float radius = 0.0f;
+        computeColliderWorldSphere(collider, center, radius);
         const utils::AABB bounds = utils::AABB::fromCenterRadius(center, radius);
         utils::LinearBVH& bvh = broadphase(collider.partition);
         if (collider.proxy == utils::LinearBVH::kInvalid) {
@@ -339,14 +344,16 @@ void XPBDWorld::generateContacts(float dt)
             return;
         }
 
+        if (!colliderIsActiveAndIsSphere(entityA) || !colliderIsActiveAndIsSphere(entityB)) {
+            return;
+        }
+
         Vec3 centerA;
         Vec3 centerB;
         float radiusA = 0.0f;
         float radiusB = 0.0f;
-        if (!colliderWorldSphere(entityA, centerA, radiusA) ||
-            !colliderWorldSphere(entityB, centerB, radiusB)) {
-            return;
-        }
+        computeColliderWorldSphere(*colliderA, centerA, radiusA);
+        computeColliderWorldSphere(*colliderB, centerB, radiusB);
 
         const float minDistance = radiusA + radiusB;
         if (!(minDistance > 0.0f)) {
@@ -421,14 +428,18 @@ void XPBDWorld::solveContacts(float dt)
         }
 
         // Re-evaluate penetration along the cached contact normal each iteration.
+        const Collider* colA = collider(contact.colliderA);
+        const Collider* colB = collider(contact.colliderB);
+        if (colA == nullptr || colB == nullptr) {
+            continue;
+        }
+
         Vec3 centerA;
         Vec3 centerB;
         float radiusA = 0.0f;
         float radiusB = 0.0f;
-        if (!colliderWorldSphere(contact.colliderA, centerA, radiusA) ||
-            !colliderWorldSphere(contact.colliderB, centerB, radiusB)) {
-            continue;
-        }
+        computeColliderWorldSphere(*colA, centerA, radiusA);
+        computeColliderWorldSphere(*colB, centerB, radiusB);
 
         const float minDistance = radiusA + radiusB;
         const float separation = dot(centerB - centerA, contact.normal);

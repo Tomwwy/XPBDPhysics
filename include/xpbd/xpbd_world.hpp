@@ -63,9 +63,15 @@ public:
     Collider* collider(Entity entity);
     const Collider* collider(Entity entity) const;
 
-    // World-space sphere of a collider's shape, using the current body pose.
-    // Returns false when the collider/shape/body is missing or degenerate.
-    bool colliderWorldSphere(Entity entity, Vec3& center, float& radius) const;
+    // Returns true if the collider is in a usable state (exists, enabled,
+    // sphere shape, body alive if body-attached, radius > 0).
+    bool colliderIsActiveAndIsSphere(Entity entity) const;
+
+    // Compute world-space center and radius of an active sphere collider.
+    // Caller must have verified via colliderIsActiveAndIsSphere().
+    void computeColliderWorldSphere(const Collider& collider,
+                                    Vec3& center,
+                                    float& radius) const;
 
     bool setColliderFilter(Entity entity,
                            CollisionLayerMask layer,
