@@ -16,23 +16,8 @@ Next up (tracked in DESIGN.md):
 - split narrow phase solver to different files, e.g. GJK, sphere vs sphere, sphere vs tetrahedron etc. 
 
 
+- Maybe turn functions like colliderWorldSphere/colliderIsActiveAndIsSphere/computeColliderWorldSphere to function template to check if valid and return world space shapes? 
 
-
-
----
-
-### 🟡 Design Issues / Improvements
-
-#### 4. Contact generation recomputes world-sphere positions wastefully
-
-`colliderWorldSphere()` is called for every collider in `refreshBroadphase()`, then AGAIN in `generateContacts()` for each candidate pair, then AGAIN per iteration in `solveContacts()`. The world-space sphere center and radius could be cached per-collider during `refreshBroadphase()` and reused. For ~750 particles with 4 substeps and 10 iterations, that's ~30,000 extra lookups per frame just for `solveContacts`. (No, maybe they can't be cached, because constraints change the data like world position constantly? )
-
-Maybe turn functions like colliderWorldSphere/colliderIsActiveAndIsSphere/computeColliderWorldSphere to function template to return world space shapes? 
-
-
-#### 5. XPBD contacts lack warm starting
-
-**`src/xpbd/xpbd_world.cpp:352`** — `contact.lambda = 0.0f` on every contact, every substep. Standard XPBD accumulates lambda across iterations within a substep (which this does), but warm starting persists lambda across substeps/frames using contact tracking. Without it, convergence is slower — you need more solver iterations to achieve the same stiffness.
 
 #### 6. `colliderWorldSphere` is sphere-specific but named generically
 
@@ -46,15 +31,6 @@ Maybe turn functions like colliderWorldSphere/colliderIsActiveAndIsSphere/comput
 
 All contacts use the global `contactCompliance_`. Different material pairs (cloth vs metal, rubber vs rubber) ideally use the maximum or product of per-collider compliance values. Currently there's no per-collider compliance field, so all contacts are equally stiff.
 
-#### 9. No collision response for edge case: sphere exactly touching
-
-In `generateContacts()` (line 342):
-```cpp
-if (distSq >= minDistance * minDistance) {
-    return;  // broadphase candidate, but not actually touching
-}
-```
-This skips exactly-touching spheres (`distSq == minDistance * minDistance`). The contact constraint is only generated for penetrating spheres (`c < 0`). This is correct for XPBD (contacts only push apart, no resting contact force), but means there's zero normal force at the exact contact point, which can cause visible jitter. Once friction is added, this will matter more.
 
 #### 10. `static thread_local` pairs vector is a hidden shared state
 
@@ -63,26 +39,3 @@ This skips exactly-touching spheres (`distSq == minDistance * minDistance`). The
 #### 11. Tests aren't wired into CMake/CTest
 
 **`tests/foundation_tests.cpp`** — The test binary is built but there's no `add_test()` or `enable_testing()` in CMakeLists.txt. Running tests requires manually executing the binary.
-
----
-
-### 🟢 Nitpicks
-
-| File              | Line | Note                                                                                                                                                                                 |
-| ----------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `typed_store.hpp` | 92   | `aliveCount()` recomputes from scratch every call; could maintain a counter                                                                                                          |
-| `xpbd_world.cpp`  | 498  | `resetConstraintLambdas` iterates over ALL distance constraints even those with `lambda == 0`                                                                                        |
-| `xpbd_world.cpp`  | 288  | `broadphaseNodes_ = 0; for (...) { broadphaseNodes_ += bvh.nodeCount(); }` — resets inside `refreshBroadphase` but overwritten at `step()` line 449 anyway                           |
-| `xpbd_simd.cpp`   | 266  | `integrateFourSse2` stores to aligned stack arrays then scalar-writes back — defeats some of the SIMD benefit. AoS→SoA layout for particles would help, but that's a larger refactor |
-| `shapes.hpp`      | 35   | Anonymous union + tagged type — technically UB when accessing inactive member, though universally supported                                                                          |
-| `main.cpp`        | 106  | `meshNormal` calls `length()` which includes `sqrt`, then divides by it — could just use `normalized()` directly                                                                     |
-
----
-
-### Top Priority Fixes
-
-If I were to fix the most impactful issues, they'd be:
-
-1. **Contact warm starting** (better convergence for the same CPU budget)
-
-Want me to implement any of these fixes?
