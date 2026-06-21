@@ -12,6 +12,10 @@ Next up (tracked in DESIGN.md):
 - Tetrahedron volume constraint and volume-conserving collision
 
 
+- damping depends on substep? pow(damping, 1.0/substeps) ?
+- refreshBroadphase() has unnecessary static bvh update? Maybe only update for entity which actually changed? 
+- Contact warm-start, somehow record last substep lambda and re-use? Needs to also be fast (e.g. using a unordered_dense map?) 
+
 
 - split narrow phase solver to different files, e.g. GJK, sphere vs sphere, sphere vs tetrahedron etc. — DONE
   (`include/xpbd/narrowphase/`: `contact.hpp` canonical result, `sphere_sphere.hpp`
@@ -45,3 +49,4 @@ All contacts use the global `contactCompliance_`. Different material pairs (clot
 #### 11. Tests aren't wired into CMake/CTest
 
 **`tests/foundation_tests.cpp`** — The test binary is built but there's no `add_test()` or `enable_testing()` in CMakeLists.txt. Running tests requires manually executing the binary.
+
