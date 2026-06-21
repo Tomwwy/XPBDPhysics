@@ -4,7 +4,8 @@
       "Bash(git show *)",
       "Bash(git rm *)",
       "Bash(cmake --build build --target xpbd)",
-      "Bash(cmake --build build --target xpbd_physics)"
+      "Bash(cmake --build build --target xpbd_physics)",
+      "Bash(git *)"
     ]
   }
 }

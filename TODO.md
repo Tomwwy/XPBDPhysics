@@ -10,3 +10,7 @@ Next up (tracked in DESIGN.md):
 - Friction in the contact solver
 - Box / capsule / tetrahedron shapes + narrowphase dispatch matrix
 - Tetrahedron volume constraint and volume-conserving collision
+
+
+
+- split narrow phase solver to different files, e.g. GJK, sphere vs sphere, sphere vs tetrahedron etc. 
