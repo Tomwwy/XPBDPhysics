@@ -11,10 +11,12 @@ namespace xpbd {
 //
 // `normal` is unit, pointing from shape A to shape B; pushing B by +normal and
 // A by -normal separates them. `penetration` is the overlap depth (>= 0 when
-// touching). When rigid bodies land this grows a world contact point per body
-// (see DESIGN.md 4.2); particles only need the normal + depth.
+// touching). `point` is the world-space contact point (the midpoint of the
+// overlap region); particles ignore it, but a rigid body uses it as the lever
+// arm for the angular part of the correction (see DESIGN.md 4.2).
 struct Contact {
     Vec3 normal{};
+    Vec3 point{};
     float penetration = 0.0f;
     bool touching = false;
 };

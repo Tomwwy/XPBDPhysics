@@ -31,9 +31,13 @@ inline Contact sphereSphere(const WorldSphere& a, const WorldSphere& b,
         const float dist = std::sqrt(distSq);
         contact.normal = delta / dist;
         contact.penetration = minDistance - dist;
+        // Contact point on the midline of the overlap: a.surface + half the
+        // overlap depth along the normal.
+        contact.point = a.center + contact.normal * (a.radius - contact.penetration * 0.5f);
     } else {
         contact.normal = fallbackNormal;
         contact.penetration = minDistance;
+        contact.point = a.center;
     }
     contact.touching = true;
     return contact;

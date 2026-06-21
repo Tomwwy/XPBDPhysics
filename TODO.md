@@ -5,10 +5,17 @@ is done — see DESIGN.md for the target architecture and the remaining
 extension work (rigidbodies, tetra volume constraints + collision, more shapes).
 
 Next up (tracked in DESIGN.md):
-- RigidBody body type (orientation, inverse inertia) + integration
-- Contact response dispatch onto rigidbodies (lever arm, angular correction)
+- RigidBody body type (orientation, inverse inertia) + integration — DONE
+  (`include/xpbd/rigid_body.hpp` + `quat.hpp` + `mat3.hpp`;
+  `rigidBodyIntegrationSystem` / `updateRigidBodyVelocities` in
+  `src/xpbd/systems/rigid_body_integration_system.cpp`.)
+- Contact response dispatch onto rigidbodies (lever arm, angular correction) — DONE
+  (`solveContacts` dispatches per body type; `Contact`/`ContactConstraint` carry
+  the world contact point. Manual demo: `examples/tetra_rigidbody.cpp`,
+  built as `xpbd_tetra_rigidbody`.)
 - Friction in the contact solver
 - Box / capsule / tetrahedron shapes + narrowphase dispatch matrix
+  (tetra rigid bodies currently use route-1 vertex spheres, DESIGN.md 6.2)
 - Tetrahedron volume constraint and volume-conserving collision
 
 

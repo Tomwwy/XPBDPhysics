@@ -1,6 +1,7 @@
 #include "raylib.h"
 #include "raymath.h"
 #include "rlgl.h"
+#include "camera_controller.hpp"
 #include "xpbd/xpbd_world.hpp"
 
 #include <algorithm>
@@ -574,12 +575,7 @@ int main()
     SetWindowMinSize(640, 360);
     SetTargetFPS(144);
 
-    Camera3D camera = {};
-    camera.position = {0.0f, 1.15f, 5.2f};
-    camera.target = {0.0f, 0.85f, 0.0f};
-    camera.up = {0.0f, 1.0f, 0.0f};
-    camera.fovy = 45.0f;
-    camera.projection = CAMERA_PERSPECTIVE;
+    examples::CameraController cameraController({0.0f, 1.15f, 5.2f}, {0.0f, 0.85f, 0.0f});
 
     xpbd::XPBDWorld world;
     world.setGravity({0.0f, -9.81f, 0.0f});
@@ -619,7 +615,7 @@ int main()
         }
         updateRuntimeSettings(world, windowForce, cloth);
 
-        UpdateCamera(&camera, CAMERA_ORBITAL);
+        cameraController.update(GetFrameTime());
 
         const float dt = std::min(GetFrameTime(), 1.0f / 30.0f);
         const double simStart = GetTime();
@@ -633,7 +629,7 @@ int main()
         BeginDrawing();
         ClearBackground({28, 30, 34, 255});
 
-        BeginMode3D(camera);
+        BeginMode3D(cameraController.camera());
         DrawGrid(24, 0.25f);
         drawCollisionSpheres(world, cloth);
         drawRandomWindowForce(windowForce);
@@ -677,13 +673,14 @@ int main()
         char forceStats[220] = {};
         std::snprintf(forceStats,
                       sizeof(forceStats),
-                      "window force: %s  strength: %.1f + %.1f random  size: %.2fx%.2fx%.2f  C/S/F toggle, arrows/page resize",
+                      "window force: %s  strength: %.1f + %.1f random  size: %.2fx%.2fx%.2f  [Tab] %s cam",
                       windowForce.enabled ? "on" : "off",
                       windowForce.baseStrength,
                       windowForce.randomStrength,
                       windowForce.width,
                       windowForce.height,
-                      windowForce.depth);
+                      windowForce.depth,
+                      cameraController.modeName());
         DrawText(forceStats, 10, 100, 18, Color{210, 218, 226, 255});
 
         EndDrawing();

@@ -3,23 +3,25 @@
 
 #include "utils/shapes.hpp"
 #include "xpbd/math.hpp"
+#include "xpbd/quat.hpp"
 
 namespace xpbd {
 
 using utils::Shape;
 using utils::ShapeType;
 
-// The world-space frame of the body a collider rides. Today a Particle supplies
-// only a position; a RigidBody will add an orientation, at which point `apply()`
-// becomes a full rigid transform and every caller below picks that up for free.
+// The world-space frame of the body a collider rides. A Particle supplies only a
+// position (orientation stays identity); a RigidBody supplies both, so `apply()`
+// rotates the local point before translating and every caller below — proxy
+// AABBs, narrowphase, contact re-evaluation — picks up rotation for free.
 struct BodyTransform {
-    Vec3 position{};  // body world origin (zero for a static / body-less collider)
-    // Quat orientation;  // future: rotate local points before translating
+    Vec3 position{};                          // body world origin (zero for a static / body-less collider)
+    Quat orientation = Quat::identity();      // body world orientation (identity for a particle)
 
     // Map a point expressed in the collider's local frame into world space.
     // The collider offset and the shape's local center are both local points,
-    // so folding them through here keeps them correct once orientation lands.
-    Vec3 apply(const Vec3& localPoint) const { return position + localPoint; }
+    // so folding them through here keeps them correct under rotation.
+    Vec3 apply(const Vec3& localPoint) const { return position + rotate(orientation, localPoint); }
 };
 
 // --- World-space shape results ---------------------------------------------

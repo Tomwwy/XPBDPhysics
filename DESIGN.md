@@ -139,7 +139,7 @@ for each substep:
 Broadphase sync + narrowphase run once per substep against integrated positions;
 the resulting contacts are re-solved every iteration alongside user constraints.
 
-## 4. Extension: Rigid bodies (planned)
+## 4. Extension: Rigid bodies (implemented)
 
 A rigid body is **not** a collider and **not** a particle. It is a body type
 with orientation and rotational inertia:
@@ -149,44 +149,58 @@ struct RigidBody {
     Vec3 position, previousPosition, velocity;
     Quat orientation, previousOrientation;
     Vec3 angularVelocity;
+    Vec3 externalForce, externalTorque;   // cleared after integration
     float inverseMass;
-    Mat3  inverseInertiaLocal;   // body-space; world = R * I^-1 * R^T
+    Mat3 inverseInertiaLocal;   // body-space; world = R * I^-1 * R^T
 };
 ```
 
-Stored in its own `TypedStore<RigidBody>` with `EntityType::*RigidBody`. A
-collider attached to a rigid body sets `body` to the rigid-body entity and uses
-`offset` (and, once shapes rotate, a local rotation) for the attachment frame.
+Stored in its own `TypedStore<RigidBody>` (`include/xpbd/rigid_body.hpp`). All
+four `*RigidBody` `EntityType`s share that store and reconstruct handles under a
+canonical type for iteration; the per-instance creation type is preserved on the
+handle the caller holds. The supporting math lives in `include/xpbd/quat.hpp`
+(unit quaternion: normalize, Hamilton product, rotate, integrate orientation)
+and `include/xpbd/mat3.hpp` (`toMat3`, `inverse`, `worldInverseInertia`).
+
+A collider attached to a rigid body sets `body` to the rigid-body entity and
+uses `offset` (a local-space point) for the attachment frame. Because
+`BodyTransform::apply` now rotates before translating, vertex colliders rotate
+with the body and the entire sphere narrowphase is reused unchanged.
 
 ### 4.1 Integration
 
-A new integration step advances rigid bodies (position via the same Verlet
-scheme; orientation via quaternion integration of `angularVelocity`, then
-re-normalize). Velocities are recovered from the position/orientation deltas
-after the solve, mirroring `updateParticleVelocities`.
+`rigidBodyIntegrationSystem` advances rigid bodies: position via the same Verlet
+scheme as particles (external force folded in through `inverseMass`), orientation
+via quaternion integration of `angularVelocity` (external torque folded in
+through the world inverse inertia), then re-normalize. Velocities are recovered
+from the position/orientation deltas after the solve in
+`updateRigidBodyVelocities`, mirroring `updateParticleVelocities` — angular
+velocity comes from the relative rotation `previousOrientation -> orientation`.
 
 ### 4.2 Contact response dispatch
 
-`solveContacts` currently treats a body as a particle (point mass, correction =
-`normal * dLambda * w`). For rigid bodies the generalized inverse mass along the
-contact normal `n` at contact point `r` (relative to COM) is:
+`solveContacts` dispatches the positional correction onto each referenced body.
+A particle is a point mass (correction = `normal * dLambda * w`). For a rigid
+body the generalized inverse mass along the contact normal `n` at lever arm `r`
+(contact point relative to COM) is:
 
 ```
-w = invMass + (r x n) . (Iinv_world * (r x n))
+w = invMass + (r x n) . (Iinv_world * (r x n))     // generalizedInverseMass()
 ```
 
-and the correction rotates as well as translates the body. The dispatch becomes:
+and the impulse rotates as well as translates the body:
 
 ```cpp
-applyCorrection(Entity body, const Vec3& contactPoint, const Vec3& impulse):
-    Particle?  -> p.position += impulse * invMass
+applyImpulse(body, impulse):
+    Particle?  -> p.position    += impulse * invMass
     RigidBody? -> rb.position    += impulse * invMass
-                  rb.orientation += angularDelta(Iinv_world, r, impulse)
+                  rb.orientation  = renormalize(rb.orientation + angularDelta)
+                  // angularDelta from Iinv_world * (r x impulse)
 ```
 
-`generateContacts` must therefore also record the world contact point per body,
-not just the normal. The constraint struct grows `Vec3 contactPointA/B` (or a
-local-space anchor) at that point.
+`generateContacts` records the world contact point on each `ContactConstraint`
+(`Contact::point` from the narrowphase), and `solveContacts` re-derives it from
+the current pose each iteration so the lever arm tracks the bodies as they move.
 
 ### 4.3 Friction
 

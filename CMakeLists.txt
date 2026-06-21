@@ -47,6 +47,7 @@ set_target_properties(raylib PROPERTIES
 
 add_library(xpbd STATIC
     src/xpbd/systems/distance_constraint_system.cpp
+    src/xpbd/systems/rigid_body_integration_system.cpp
     src/xpbd/systems/verlet_integration_system.cpp
     src/xpbd/xpbd_simd.cpp
     src/xpbd/xpbd_world.cpp
@@ -75,6 +76,7 @@ else()
 endif()
 
 add_executable(xpbd_physics main.cpp)
+target_include_directories(xpbd_physics PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 if(MSVC)
     target_compile_options(xpbd_physics PRIVATE /W4)
@@ -83,6 +85,15 @@ else()
 endif()
 
 target_link_libraries(xpbd_physics PRIVATE xpbd raylib)
+
+add_executable(xpbd_tetra_rigidbody examples/tetra_rigidbody.cpp)
+target_include_directories(xpbd_tetra_rigidbody PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+if(MSVC)
+    target_compile_options(xpbd_tetra_rigidbody PRIVATE /W4)
+else()
+    target_compile_options(xpbd_tetra_rigidbody PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+target_link_libraries(xpbd_tetra_rigidbody PRIVATE xpbd raylib)
 
 add_executable(xpbd_tests tests/foundation_tests.cpp)
 target_link_libraries(xpbd_tests PRIVATE xpbd)
@@ -98,5 +109,12 @@ add_custom_command(TARGET xpbd_physics POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${RAYLIB_DLL}"
         "$<TARGET_FILE_DIR:xpbd_physics>/raylib.dll"
+    VERBATIM
+)
+
+add_custom_command(TARGET xpbd_tetra_rigidbody POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${RAYLIB_DLL}"
+        "$<TARGET_FILE_DIR:xpbd_tetra_rigidbody>/raylib.dll"
     VERBATIM
 )

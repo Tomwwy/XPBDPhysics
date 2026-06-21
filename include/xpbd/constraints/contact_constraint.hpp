@@ -20,6 +20,7 @@ struct ContactConstraint {
     Entity bodyA;         // bodies to correct (may be invalid => static)
     Entity bodyB;
     Vec3 normal{};        // unit, A -> B; fallback direction if coincident
+    Vec3 point{};         // world-space contact point; lever arm for rigid bodies
     float compliance = 0.0f;
     float lambda = 0.0f;  // accumulated over solver iterations within a substep
 };

@@ -183,6 +183,99 @@ void testParticleDestroyLazilyRemovesReferences()
     check(world.contactCount() == 0, "no contacts from destroyed particle references");
 }
 
+// Quaternion / Mat3 basics the rigid-body solver relies on.
+void testRigidBodyMath()
+{
+    // Rotating a vector 90 deg about +Y maps +X to -Z (right-handed).
+    const xpbd::Quat q = xpbd::Quat::fromAxisAngle({0.0f, 1.0f, 0.0f}, 3.14159265f * 0.5f);
+    const xpbd::Vec3 r = xpbd::rotate(q, {1.0f, 0.0f, 0.0f});
+    check(approx(r.x, 0.0f) && approx(r.y, 0.0f) && approx(r.z, -1.0f),
+          "quaternion rotates +X about +Y to -Z");
+
+    // toMat3 must agree with rotate().
+    const xpbd::Vec3 m = xpbd::toMat3(q) * xpbd::Vec3{1.0f, 0.0f, 0.0f};
+    check(approx(m.x, r.x) && approx(m.y, r.y) && approx(m.z, r.z),
+          "rotation matrix matches quaternion rotate");
+
+    // inverse(diagonal) is the reciprocal diagonal.
+    const xpbd::Mat3 inv = xpbd::inverse(xpbd::Mat3::diagonal(2.0f, 4.0f, 8.0f));
+    check(approx(inv.rows[0].x, 0.5f) && approx(inv.rows[1].y, 0.25f) && approx(inv.rows[2].z, 0.125f),
+          "diagonal matrix inverse is reciprocal diagonal");
+}
+
+// A free rigid body under gravity falls like a point mass (no spurious spin).
+void testRigidBodyFreeFall()
+{
+    xpbd::XPBDWorld world;
+    world.setGravity({0.0f, -9.81f, 0.0f});
+    world.setDamping(1.0f);  // undamped, so the drop matches 0.5 g t^2
+    world.setSubsteps(4);
+    world.addIntegrationSystem(xpbd::XPBDWorld::rigidBodyIntegrationSystem);
+
+    const xpbd::Entity body = world.createRigidBody(
+        {0.0f, 5.0f, 0.0f}, xpbd::Quat::identity(), 1.0f, xpbd::Mat3::identity());
+
+    const float t = 1.0f;
+    const int steps = 120;
+    for (int i = 0; i < steps; ++i) {
+        world.step(t / static_cast<float>(steps));
+    }
+
+    const xpbd::RigidBody* rb = world.rigidBody(body);
+    check(rb != nullptr, "rigid body survived simulation");
+    if (rb == nullptr) {
+        return;
+    }
+    // Undamped Verlet free-fall over 1s ~ 0.5 g t^2 = 4.905. Allow a small margin.
+    check(approx(rb->position.y, 5.0f - 4.905f, 0.1f), "rigid body falls under gravity ~0.5gt^2");
+    const float spin = xpbd::length(rb->angularVelocity);
+    check(spin < 1e-3f, "free fall introduces no spurious angular velocity");
+}
+
+// A tetrahedron rigid body dropped onto a static floor must come to rest above
+// it (its lowest vertex sphere not tunneling through) rather than passing through.
+void testTetrahedronRigidBodyRestsOnGround()
+{
+    xpbd::XPBDWorld world;
+    world.setGravity({0.0f, -9.81f, 0.0f});
+    world.setSubsteps(8);
+    world.setSolverIterations(12);
+    world.addIntegrationSystem(xpbd::XPBDWorld::rigidBodyIntegrationSystem);
+
+    // Large static sphere as the ground (reuses the sphere pipeline).
+    const float groundRadius = 20.0f;
+    world.createStaticCollider(xpbd::Shape::makeSphere(groundRadius),
+                               {0.0f, -groundRadius, 0.0f});
+
+    const float vertexRadius = 0.12f;
+    const xpbd::Vec3 verts[4] = {
+        {0.0f, 1.6f, 0.0f},
+        {0.5f, 1.0f, 0.0f},
+        {-0.25f, 1.0f, 0.43f},
+        {-0.25f, 1.0f, -0.43f},
+    };
+    const xpbd::Entity tet =
+        world.createTetrahedronRigidBody(verts, 1.0f, vertexRadius);
+
+    check(world.rigidBodyCount() == 1, "one rigid body created");
+    check(world.colliderCount() == 5, "four vertex colliders + ground collider");
+
+    for (int i = 0; i < 600; ++i) {
+        world.step(1.0f / 120.0f);
+    }
+
+    const xpbd::RigidBody* rb = world.rigidBody(tet);
+    check(rb != nullptr, "tetrahedron rigid body survived simulation");
+    if (rb == nullptr) {
+        return;
+    }
+    // Centroid must settle above the floor (y = 0) by at least a vertex radius
+    // and must not have tunneled below it.
+    check(rb->position.y > vertexRadius * 0.5f, "tetrahedron rests above the ground");
+    check(rb->position.y < 1.5f, "tetrahedron actually fell from its start height");
+    check(std::isfinite(rb->position.y), "tetrahedron pose stays finite");
+}
+
 }  // namespace
 
 int main()
@@ -192,6 +285,9 @@ int main()
     testSameBodyCollidersDoNotSelfCollide();
     testColliderLifecycle();
     testParticleDestroyLazilyRemovesReferences();
+    testRigidBodyMath();
+    testRigidBodyFreeFall();
+    testTetrahedronRigidBodyRestsOnGround();
 
     if (gFailures == 0) {
         std::printf("All XPBD foundation tests passed.\n");

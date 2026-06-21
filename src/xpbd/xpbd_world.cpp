@@ -30,6 +30,68 @@ Entity XPBDWorld::createParticle(const Vec3& position, float mass)
     return particles_.create(EntityType::Particle, particle);
 }
 
+Entity XPBDWorld::createRigidBody(const Vec3& position,
+                                  const Quat& orientation,
+                                  float mass,
+                                  const Mat3& inverseInertiaLocal,
+                                  EntityType type)
+{
+    RigidBody body;
+    body.position = position;
+    body.previousPosition = position;
+    body.velocity = {};
+    body.orientation = normalized(orientation);
+    body.previousOrientation = body.orientation;
+    body.angularVelocity = {};
+    body.externalForce = {};
+    body.externalTorque = {};
+    body.inverseMass = mass > 0.0f ? 1.0f / mass : 0.0f;
+    body.inverseInertiaLocal = mass > 0.0f ? inverseInertiaLocal : Mat3::zero();
+    return rigidBodies_.create(type, body);
+}
+
+Entity XPBDWorld::createTetrahedronRigidBody(const Vec3 vertices[4],
+                                             float mass,
+                                             float vertexRadius,
+                                             CollisionLayerMask layer,
+                                             CollisionLayerMask mask,
+                                             std::vector<Entity>* outColliders)
+{
+    const Vec3 centroid = (vertices[0] + vertices[1] + vertices[2] + vertices[3]) * 0.25f;
+
+    // Solid-tetrahedron inertia about the centroid, approximated as the inertia
+    // of four point masses (mass/4) at the vertices. This is a reasonable proxy
+    // for a tet built from vertex spheres and stays positive-definite for any
+    // non-degenerate tet. I = sum m_i (|r|^2 I3 - r r^T).
+    Mat3 inertia = Mat3::zero();
+    const float pointMass = mass > 0.0f ? mass * 0.25f : 0.0f;
+    for (int i = 0; i < 4; ++i) {
+        const Vec3 r = vertices[i] - centroid;
+        const float rSq = dot(r, r);
+        inertia.rows[0] += Vec3{rSq - r.x * r.x, -r.x * r.y, -r.x * r.z} * pointMass;
+        inertia.rows[1] += Vec3{-r.y * r.x, rSq - r.y * r.y, -r.y * r.z} * pointMass;
+        inertia.rows[2] += Vec3{-r.z * r.x, -r.z * r.y, rSq - r.z * r.z} * pointMass;
+    }
+
+    const Mat3 inverseInertia = mass > 0.0f ? inverse(inertia) : Mat3::zero();
+    const Entity body = createRigidBody(centroid, Quat::identity(), mass, inverseInertia,
+                                        EntityType::TetrahedronRigidBody);
+
+    for (int i = 0; i < 4; ++i) {
+        const Entity collider = createCollider(
+            body,
+            Shape::makeSphere(vertexRadius),
+            layer,
+            mask,
+            BroadphasePartition::Dynamic,
+            vertices[i] - centroid);  // local offset; rotates with the body
+        if (outColliders != nullptr) {
+            outColliders->push_back(collider);
+        }
+    }
+    return body;
+}
+
 Entity XPBDWorld::createDistanceConstraint(Entity particleA,
                                            Entity particleB,
                                            float restLength,
@@ -75,6 +137,11 @@ bool XPBDWorld::destroy(Entity entity)
     switch (entity.type()) {
     case EntityType::Particle:
         return particles_.destroy(entity);
+    case EntityType::SphereRigidBody:
+    case EntityType::BoxRigidBody:
+    case EntityType::TetrahedronRigidBody:
+    case EntityType::CapsuleRigidBody:
+        return rigidBodies_.destroy(entity);
     case EntityType::DistanceConstraint:
         return distanceConstraints_.destroy(entity);
     case EntityType::Collider: {
@@ -95,6 +162,11 @@ bool XPBDWorld::alive(Entity entity) const
     switch (entity.type()) {
     case EntityType::Particle:
         return particles_.alive(entity);
+    case EntityType::SphereRigidBody:
+    case EntityType::BoxRigidBody:
+    case EntityType::TetrahedronRigidBody:
+    case EntityType::CapsuleRigidBody:
+        return rigidBodies_.alive(entity);
     case EntityType::DistanceConstraint:
         return distanceConstraints_.alive(entity);
     case EntityType::Collider:
@@ -114,6 +186,44 @@ Particle* XPBDWorld::particle(Entity entity)
 const Particle* XPBDWorld::particle(Entity entity) const
 {
     return entity.type() == EntityType::Particle ? particles_.get(entity) : nullptr;
+}
+
+bool XPBDWorld::isRigidBody(Entity entity)
+{
+    switch (entity.type()) {
+    case EntityType::SphereRigidBody:
+    case EntityType::BoxRigidBody:
+    case EntityType::TetrahedronRigidBody:
+    case EntityType::CapsuleRigidBody:
+        return true;
+    default:
+        return false;
+    }
+}
+
+RigidBody* XPBDWorld::rigidBody(Entity entity)
+{
+    return isRigidBody(entity) ? rigidBodies_.get(entity) : nullptr;
+}
+
+const RigidBody* XPBDWorld::rigidBody(Entity entity) const
+{
+    return isRigidBody(entity) ? rigidBodies_.get(entity) : nullptr;
+}
+
+bool XPBDWorld::resolveBodyTransform(Entity body, BodyTransform& out) const
+{
+    if (const Particle* p = particle(body)) {
+        out.position = p->position;
+        out.orientation = Quat::identity();
+        return true;
+    }
+    if (const RigidBody* rb = rigidBody(body)) {
+        out.position = rb->position;
+        out.orientation = rb->orientation;
+        return true;
+    }
+    return false;
 }
 
 DistanceConstraint* XPBDWorld::distanceConstraint(Entity entity)
@@ -152,6 +262,7 @@ bool XPBDWorld::setColliderFilter(Entity entity,
 void XPBDWorld::clearEntities()
 {
     particles_.destroyAll();
+    rigidBodies_.destroyAll();
     distanceConstraints_.destroyAll();
     colliders_.destroyAll();
     for (utils::LinearBVH& bvh : broadphases_) {
@@ -242,8 +353,10 @@ void XPBDWorld::refreshBroadphase()
         const std::optional<WorldSphere> sphere = worldShape<ShapeType::Sphere>(collider);
         if (!sphere) {
             removeColliderProxy(collider);
-            // mark destroy because collider body is gone
-            if (collider.body.valid() && particle(collider.body) == nullptr) {
+            // mark destroy when the collider's body is gone (resolveBodyTransform
+            // fails for a dead Particle or RigidBody handle).
+            BodyTransform xf;
+            if (collider.body.valid() && !resolveBodyTransform(collider.body, xf)) {
                 collidersToDestroy.push_back(entity);
             }
             return;
@@ -342,6 +455,7 @@ void XPBDWorld::generateContacts(float dt)
         contact.compliance = contactCompliance_;
         contact.lambda = 0.0f;
         contact.normal = hit.normal;
+        contact.point = hit.point;
         contacts_.push_back(contact);
     };
 
@@ -367,8 +481,9 @@ void XPBDWorld::generateContacts(float dt)
 }
 
 // XPBD contact solve with per-substep lambda accumulation. Dispatches the
-// positional correction onto each referenced body. Today the only body type is
-// Particle; a RigidBody branch slots in here (apply at lever arm).
+// positional correction onto each referenced body: a Particle is a point mass
+// (correction = normal * dLambda * w); a RigidBody also rotates, using the lever
+// arm from its center of mass to the contact point (DESIGN.md 4.2).
 void XPBDWorld::solveContacts(float dt)
 {
     const float dtSq = dt * dt;
@@ -376,18 +491,58 @@ void XPBDWorld::solveContacts(float dt)
         return;
     }
 
-    for (ContactConstraint& contact : contacts_) {
-        Particle* a = particle(contact.bodyA);  // null => static/body-less
-        Particle* b = particle(contact.bodyB);
+    // Per-body state needed to apply a correction: inverse mass, world inverse
+    // inertia, and the lever arm r (contact point - center of mass). A particle
+    // (or static body) leaves inertia zero and r unused.
+    struct BodyResponse {
+        Particle* particle = nullptr;
+        RigidBody* rigid = nullptr;
+        float inverseMass = 0.0f;
+        Mat3 inverseInertiaWorld = Mat3::zero();
+        Vec3 r{};  // lever arm from COM to contact point
+    };
 
-        const float wA = a != nullptr ? a->inverseMass : 0.0f;
-        const float wB = b != nullptr ? b->inverseMass : 0.0f;
-        const float wSum = wA + wB;
-        if (wSum <= 0.0f) {
-            continue;
+    const auto resolveResponse = [this](Entity body, const Vec3& contactPoint) {
+        BodyResponse response;
+        if (Particle* p = particle(body)) {
+            response.particle = p;
+            response.inverseMass = p->inverseMass;
+        } else if (RigidBody* rb = rigidBody(body)) {
+            response.rigid = rb;
+            response.inverseMass = rb->inverseMass;
+            response.inverseInertiaWorld =
+                worldInverseInertia(rb->orientation, rb->inverseInertiaLocal);
+            response.r = contactPoint - rb->position;
         }
+        return response;
+    };
 
-        // Re-evaluate penetration along the cached contact normal each iteration.
+    // Generalized inverse mass of a body along the contact normal.
+    const auto effectiveMass = [](const BodyResponse& body, const Vec3& normal) {
+        if (body.rigid != nullptr) {
+            return generalizedInverseMass(body.inverseMass, body.inverseInertiaWorld,
+                                          body.r, normal);
+        }
+        return body.inverseMass;  // particle / static
+    };
+
+    // Apply a positional impulse to a body: translate by impulse * invMass and,
+    // for a rigid body, rotate by the angular response about the lever arm.
+    const auto applyImpulse = [](BodyResponse& body, const Vec3& impulse) {
+        if (body.particle != nullptr) {
+            body.particle->position += impulse * body.inverseMass;
+        } else if (body.rigid != nullptr) {
+            body.rigid->position += impulse * body.inverseMass;
+            const Vec3 angular = body.inverseInertiaWorld * cross(body.r, impulse);
+            body.rigid->orientation =
+                normalized(Quat{angular.x, angular.y, angular.z, 0.0f} *
+                               body.rigid->orientation * 0.5f +
+                           body.rigid->orientation);
+        }
+    };
+
+    for (ContactConstraint& contact : contacts_) {
+        // Re-evaluate the geometry along the cached normal each iteration.
         const Collider* colA = collider(contact.colliderA);
         const Collider* colB = collider(contact.colliderB);
         if (colA == nullptr || colB == nullptr) {
@@ -407,17 +562,28 @@ void XPBDWorld::solveContacts(float dt)
             continue;
         }
 
+        // Contact point on the overlap midline, updated for the current pose so
+        // the rigid-body lever arm tracks the bodies as they move.
+        const Vec3 contactPoint =
+            sphereA->center + contact.normal * (sphereA->radius + c * 0.5f);
+
+        BodyResponse a = resolveResponse(contact.bodyA, contactPoint);
+        BodyResponse b = resolveResponse(contact.bodyB, contactPoint);
+
+        const float wA = effectiveMass(a, contact.normal);
+        const float wB = effectiveMass(b, contact.normal);
+        const float wSum = wA + wB;
+        if (wSum <= 0.0f) {
+            continue;
+        }
+
         const float alpha = contact.compliance / dtSq;
         const float deltaLambda = (-c - alpha * contact.lambda) / (wSum + alpha);
         contact.lambda += deltaLambda;
 
-        const Vec3 correction = contact.normal * deltaLambda;
-        if (a != nullptr) {
-            a->position -= correction * wA;
-        }
-        if (b != nullptr) {
-            b->position += correction * wB;
-        }
+        const Vec3 impulse = contact.normal * deltaLambda;
+        applyImpulse(a, -impulse);
+        applyImpulse(b, impulse);
     }
 }
 
@@ -460,6 +626,7 @@ void XPBDWorld::step(float dt)
         contacts_count_ += contacts_.size();
 
         updateParticleVelocities(subDt);
+        updateRigidBodyVelocities(subDt);
     }
 }
 
@@ -467,6 +634,8 @@ void XPBDWorld::step(float dt)
 
 std::size_t XPBDWorld::particleSlots() const { return particles_.slots(); }
 std::size_t XPBDWorld::particleCount() const { return particles_.aliveCount(); }
+std::size_t XPBDWorld::rigidBodySlots() const { return rigidBodies_.slots(); }
+std::size_t XPBDWorld::rigidBodyCount() const { return rigidBodies_.aliveCount(); }
 std::size_t XPBDWorld::distanceConstraintSlots() const { return distanceConstraints_.slots(); }
 std::size_t XPBDWorld::distanceConstraintCount() const { return distanceConstraints_.aliveCount(); }
 std::size_t XPBDWorld::colliderSlots() const { return colliders_.slots(); }

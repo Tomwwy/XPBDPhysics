@@ -10,6 +10,7 @@
 #include "xpbd/constraints/distance_constraint.hpp"
 #include "xpbd/entity.hpp"
 #include "xpbd/particle.hpp"
+#include "xpbd/rigid_body.hpp"
 #include "xpbd/typed_store.hpp"
 #include "xpbd/xpbd_simd.hpp"
 
@@ -31,6 +32,30 @@ public:
 
     // --- Entity creation ---------------------------------------------------
     Entity createParticle(const Vec3& position, float mass);
+
+    // A rigid body with explicit body-space inverse inertia. `type` records the
+    // intended shape family (SphereRigidBody, TetrahedronRigidBody, ...) for the
+    // caller's bookkeeping; the body integrates identically regardless.
+    Entity createRigidBody(const Vec3& position,
+                           const Quat& orientation,
+                           float mass,
+                           const Mat3& inverseInertiaLocal,
+                           EntityType type = EntityType::SphereRigidBody);
+
+    // Convenience builder for a regular(ish) tetrahedron rigid body: creates the
+    // body with a solid-tetrahedron inertia derived from `vertices` and `mass`,
+    // and attaches a sphere collider at each vertex (offset = vertex - centroid)
+    // so collision reuses the sphere pipeline (DESIGN.md 6.2, route 1). The body
+    // origin is the centroid; `vertices` are in world space at rest.
+    // Returns the rigid-body entity; the four collider entities are appended to
+    // `outColliders` when non-null.
+    Entity createTetrahedronRigidBody(const Vec3 vertices[4],
+                                      float mass,
+                                      float vertexRadius,
+                                      CollisionLayerMask layer = kCollisionLayerDefault,
+                                      CollisionLayerMask mask = kCollisionLayerAll,
+                                      std::vector<Entity>* outColliders = nullptr);
+
     Entity createDistanceConstraint(Entity particleA,
                                     Entity particleB,
                                     float restLength,
@@ -59,6 +84,12 @@ public:
     Particle* particle(Entity entity);
     const Particle* particle(Entity entity) const;
 
+    RigidBody* rigidBody(Entity entity);
+    const RigidBody* rigidBody(Entity entity) const;
+
+    // True for any of the *RigidBody EntityTypes.
+    static bool isRigidBody(Entity entity);
+
     DistanceConstraint* distanceConstraint(Entity entity);
     const DistanceConstraint* distanceConstraint(Entity entity) const;
 
@@ -80,12 +111,8 @@ public:
             return std::nullopt;
         }
         BodyTransform xf;
-        if (collider.body.valid()) {
-            const Particle* body = particle(collider.body);
-            if (body == nullptr) {
-                return std::nullopt;  // body died; proxy reaped next refresh
-            }
-            xf.position = body->position;
+        if (collider.body.valid() && !resolveBodyTransform(collider.body, xf)) {
+            return std::nullopt;  // body died; proxy reaped next refresh
         }
         if (!Traits::localValid(collider.shape)) {
             return std::nullopt;
@@ -142,6 +169,8 @@ public:
     // --- Statistics --------------------------------------------------------
     std::size_t particleSlots() const;
     std::size_t particleCount() const;
+    std::size_t rigidBodySlots() const;
+    std::size_t rigidBodyCount() const;
     std::size_t distanceConstraintSlots() const;
     std::size_t distanceConstraintCount() const;
     std::size_t colliderSlots() const;
@@ -189,12 +218,30 @@ public:
         colliders_.forEachAlive(EntityType::Collider, std::forward<Func>(func));
     }
 
+    template <typename Func>
+    void forEachRigidBody(Func&& func)
+    {
+        rigidBodies_.forEachAlive(kRigidBodyStoreType, std::forward<Func>(func));
+    }
+
+    template <typename Func>
+    void forEachRigidBody(Func&& func) const
+    {
+        rigidBodies_.forEachAlive(kRigidBodyStoreType, std::forward<Func>(func));
+    }
+
     static void verletIntegrationSystem(XPBDWorld& world, float dt);
+    static void rigidBodyIntegrationSystem(XPBDWorld& world, float dt);
     static void distanceConstraintSystem(XPBDWorld& world, float dt);
 
 private:
     void resetConstraintLambdas();
     void updateParticleVelocities(float dt);
+    void updateRigidBodyVelocities(float dt);
+
+    // Resolve a body entity (Particle or RigidBody) into its world transform.
+    // Returns false if the entity is not a live body, so callers reap the proxy.
+    bool resolveBodyTransform(Entity body, BodyTransform& out) const;
 
     // Collision pipeline (built-in, gated by collisionsEnabled_).
     void refreshBroadphase();
@@ -204,7 +251,13 @@ private:
 
     utils::LinearBVH& broadphase(BroadphasePartition partition);
 
+    // All *RigidBody entity types share one store; iteration reconstructs handles
+    // under this canonical type (store lookups key on index+generation only, so
+    // the per-instance creation type is preserved on the handle the caller holds).
+    static constexpr EntityType kRigidBodyStoreType = EntityType::SphereRigidBody;
+
     TypedStore<Particle> particles_;
+    TypedStore<RigidBody> rigidBodies_;
     TypedStore<DistanceConstraint> distanceConstraints_;
     TypedStore<Collider> colliders_;
     std::vector<System> integrationSystems_;
