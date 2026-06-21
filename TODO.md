@@ -14,14 +14,10 @@ Next up (tracked in DESIGN.md):
 
 
 - split narrow phase solver to different files, e.g. GJK, sphere vs sphere, sphere vs tetrahedron etc. 
-- No same-body collision filter (contact generation) emitContact lambda does NOT check whether two different colliders belong to the **same body**. If attach two sphere colliders to one particle (a compound shape), they will generate spurious self-contacts with each other.
-- Destroying a particle orphans its colliders and constraints, `destroy()` handles `EntityType::Particle` by simply calling `particles_.destroy(entity)`. It does NOT cascade to destroy the colliders and distance constraints that reference that particle. Consequences: **Colliders**: Their proxies are lazily removed in the next `refreshBroadphase()` (because `colliderWorldSphere` returns false when the body particle is dead), but the `Collider` entity itself lives forever in `colliders_`, leaking a slot. **Distance constraints**: They persist forever in `distanceConstraints_`. Each substep, the solver checks `world.particle(constraint.particleA)` and skips them, wasting iteration time.
 
 
 
-#### 3. `renderMs` measurement is incorrect in demo
 
-**`main.cpp:632` and `main.cpp:689`** — `renderMs` is measured as `(GetTime() - renderStart) * 1000.0`, but `renderStart` is obtained AFTER the simulation step, and `GetTime()` at line 689 is obtained AFTER `EndDrawing()`. However, `renderMs` from the **previous** frame is displayed (line 661), and it's only used for display. Minor, but the value shown is always one frame stale.
 
 ---
 
@@ -84,8 +80,6 @@ This skips exactly-touching spheres (`distSq == minDistance * minDistance`). The
 
 If I were to fix the most impactful issues, they'd be:
 
-1. **Same-body collision filter** (1-line fix, prevents real bugs with compound shapes)
-2. **Cascading entity destruction** (proper cleanup on particle destroy)
-3. **Contact warm starting** (better convergence for the same CPU budget)
+1. **Contact warm starting** (better convergence for the same CPU budget)
 
 Want me to implement any of these fixes?

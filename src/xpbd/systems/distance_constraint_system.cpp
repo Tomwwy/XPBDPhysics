@@ -1,5 +1,7 @@
 #include "xpbd/xpbd_world.hpp"
 
+#include <vector>
+
 namespace xpbd {
 
 void XPBDWorld::distanceConstraintSystem(XPBDWorld& world, float dt)
@@ -9,14 +11,18 @@ void XPBDWorld::distanceConstraintSystem(XPBDWorld& world, float dt)
         return;
     }
 
-    world.forEachDistanceConstraint([&world, dtSq](Entity, DistanceConstraint& constraint) {
-        if (!constraint.enabled) {
-            return;
-        }
+    std::vector<Entity> constraintsToDestroy;
 
+    world.forEachDistanceConstraint([&world, dtSq, &constraintsToDestroy](Entity entity,
+                                                                          DistanceConstraint& constraint) {
         Particle* particleA = world.particle(constraint.particleA);
         Particle* particleB = world.particle(constraint.particleB);
         if (particleA == nullptr || particleB == nullptr) {
+            // one or both particles are gone, constraint not useful anymore, mark destroy
+            constraintsToDestroy.push_back(entity);
+            return;
+        }
+        if (!constraint.enabled) {
             return;
         }
 
@@ -43,6 +49,10 @@ void XPBDWorld::distanceConstraintSystem(XPBDWorld& world, float dt)
         particleA->position -= correction * wA;
         particleB->position += correction * wB;
     });
+
+    for (Entity entity : constraintsToDestroy) {
+        world.destroy(entity);
+    }
 }
 
 }  // namespace xpbd

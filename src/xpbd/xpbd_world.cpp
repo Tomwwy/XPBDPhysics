@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <utility>
+#include <vector>
 
 namespace xpbd {
 
@@ -254,12 +255,19 @@ void XPBDWorld::removeColliderProxy(Collider& collider)
 // broadphase pair resolves straight back to the collider with no side maps.
 void XPBDWorld::refreshBroadphase()
 {
-    colliders_.forEachAlive(EntityType::Collider, [this](Entity entity, Collider& collider) {
+    std::vector<Entity> collidersToDestroy;
+
+    colliders_.forEachAlive(EntityType::Collider,
+                            [this, &collidersToDestroy](Entity entity, Collider& collider) {
         Vec3 center;
         float radius = 0.0f;
         const bool active = collider.enabled && colliderWorldSphere(entity, center, radius);
         if (!active) {
             removeColliderProxy(collider);
+            // mark destroy because collider body is gone
+            if (collider.body.valid() && particle(collider.body) == nullptr) {
+                collidersToDestroy.push_back(entity);
+            }
             return;
         }
 
@@ -272,6 +280,10 @@ void XPBDWorld::refreshBroadphase()
             collider.proxy = bvh.insertProxy(bounds, entity.value);
         }
     });
+
+    for (Entity entity : collidersToDestroy) {
+        destroy(entity);
+    }
 
     ++broadphaseSolveCount_;
     const bool rebuildByCadence =
@@ -316,6 +328,10 @@ void XPBDWorld::generateContacts(float dt)
         const Collider* colliderA = collider(entityA);
         const Collider* colliderB = collider(entityB);
         if (colliderA == nullptr || colliderB == nullptr) {
+            return;
+        }
+        // same body multiple colliders shouldn't self collide
+        if (colliderA->body.valid() && colliderA->body == colliderB->body) {
             return;
         }
         if (!collisionFiltersMatch(colliderA->layer, colliderA->mask,
@@ -514,5 +530,3 @@ void XPBDWorld::updateParticleVelocities(float dt)
 }
 
 }  // namespace xpbd
-
-

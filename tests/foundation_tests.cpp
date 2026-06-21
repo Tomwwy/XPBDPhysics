@@ -99,6 +99,32 @@ void testDynamicPairAndFiltering()
     }
 }
 
+// Multiple colliders on one particle are a compound shape, not independent
+// bodies, so they must not generate self-contacts with each other.
+void testSameBodyCollidersDoNotSelfCollide()
+{
+    xpbd::XPBDWorld world;
+    world.setGravity({0.0f, 0.0f, 0.0f});
+    world.setSubsteps(1);
+
+    const xpbd::Entity p = world.createParticle({0.0f, 0.0f, 0.0f}, 1.0f);
+    world.createCollider(p,
+                         xpbd::Shape::makeSphere(0.25f),
+                         xpbd::kCollisionLayerDefault,
+                         xpbd::kCollisionLayerAll,
+                         xpbd::BroadphasePartition::Dynamic,
+                         {-0.1f, 0.0f, 0.0f});
+    world.createCollider(p,
+                         xpbd::Shape::makeSphere(0.25f),
+                         xpbd::kCollisionLayerDefault,
+                         xpbd::kCollisionLayerAll,
+                         xpbd::BroadphasePartition::Dynamic,
+                         {0.1f, 0.0f, 0.0f});
+
+    world.step(1.0f / 60.0f);
+    check(world.contactCount() == 0, "same-body colliders do not self-collide");
+}
+
 // Destroying a collider must remove its proxy without disturbing others.
 void testColliderLifecycle()
 {
@@ -117,13 +143,55 @@ void testColliderLifecycle()
     check(world.contactCount() == 0, "no contacts after collider removed");
 }
 
+// Destroying a particle invalidates its handle; referencing colliders and
+// constraints are cleaned up lazily when their systems next resolve that handle.
+void testParticleDestroyLazilyRemovesReferences()
+{
+    xpbd::XPBDWorld world;
+    world.setGravity({0.0f, 0.0f, 0.0f});
+    world.addConstraintSystem(xpbd::XPBDWorld::distanceConstraintSystem);
+
+    const xpbd::Entity doomed = world.createParticle({0.0f, 0.0f, 0.0f}, 1.0f);
+    const xpbd::Entity survivor = world.createParticle({2.0f, 0.0f, 0.0f}, 1.0f);
+    const xpbd::Entity third = world.createParticle({3.0f, 0.0f, 0.0f}, 1.0f);
+
+    const xpbd::Entity doomedCollider =
+        world.createCollider(doomed, xpbd::Shape::makeSphere(0.25f));
+    const xpbd::Entity survivorCollider =
+        world.createCollider(survivor, xpbd::Shape::makeSphere(0.25f));
+    const xpbd::Entity doomedConstraint =
+        world.createDistanceConstraint(doomed, survivor, 2.0f);
+    const xpbd::Entity survivorConstraint =
+        world.createDistanceConstraint(survivor, third, 1.0f);
+
+    world.step(1.0f / 120.0f);  // create broadphase proxies before destruction
+
+    check(world.destroy(doomed), "particle destroyed");
+    check(!world.alive(doomed), "destroyed particle is not alive");
+    check(world.alive(doomedCollider), "referencing collider awaits lazy cleanup");
+    check(world.alive(doomedConstraint), "referencing constraint awaits lazy cleanup");
+
+    world.step(1.0f / 120.0f);  // resolves dead handles and cleans up references
+    check(!world.alive(doomedCollider), "referencing collider destroyed");
+    check(world.alive(survivorCollider), "unrelated collider survives");
+    check(!world.alive(doomedConstraint), "referencing distance constraint destroyed");
+    check(world.alive(survivorConstraint), "unrelated distance constraint survives");
+    check(world.colliderCount() == 1, "only unrelated collider remains");
+    check(world.distanceConstraintCount() == 1, "only unrelated distance constraint remains");
+
+    world.step(1.0f / 120.0f);  // must not touch the removed collider proxy
+    check(world.contactCount() == 0, "no contacts from destroyed particle references");
+}
+
 }  // namespace
 
 int main()
 {
     testDynamicVsStaticContact();
     testDynamicPairAndFiltering();
+    testSameBodyCollidersDoNotSelfCollide();
     testColliderLifecycle();
+    testParticleDestroyLazilyRemovesReferences();
 
     if (gFailures == 0) {
         std::printf("All XPBD foundation tests passed.\n");

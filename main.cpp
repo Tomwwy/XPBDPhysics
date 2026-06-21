@@ -643,6 +643,7 @@ int main()
             drawClothMesh(renderer, world, cloth);
         }
         EndMode3D();
+        renderMs = (GetTime() - renderStart) * 1000.0;
 
         DrawFPS(10, 10);
         char stats[160] = {};
@@ -657,7 +658,7 @@ int main()
         char timings[160] = {};
         std::snprintf(timings,
                       sizeof(timings),
-                      "sim: %.2f ms  frame: %.2f ms  %s  sphere collision: %s  cloth self: %s",
+                      "sim: %.2f ms  render: %.2f ms  %s  sphere collision: %s  cloth self: %s",
                       simMs,
                       renderMs,
                       paused ? "paused" : "running",
@@ -686,7 +687,6 @@ int main()
         DrawText(forceStats, 10, 100, 18, Color{210, 218, 226, 255});
 
         EndDrawing();
-        renderMs = (GetTime() - renderStart) * 1000.0;
     }
 
     unloadClothRenderer(renderer);
