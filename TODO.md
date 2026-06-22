@@ -20,7 +20,7 @@ Next up (tracked in DESIGN.md):
 
 
 - damping depends on substep? pow(damping, 1.0/substeps) ?
-- refreshBroadphase() has unnecessary static bvh update? Maybe only update for entity which actually changed? 
+- refreshBroadphase() has unnecessary static bvh update? Maybe only update for entity which actually changed (Collider entity has something like "changed" bool)? 
 - Contact warm-start, somehow record last substep lambda and re-use? Needs to also be fast (e.g. using a unordered_dense map?) 
 
 
@@ -57,3 +57,7 @@ All contacts use the global `contactCompliance_`. Different material pairs (clot
 
 **`tests/foundation_tests.cpp`** — The test binary is built but there's no `add_test()` or `enable_testing()` in CMakeLists.txt. Running tests requires manually executing the binary.
 
+
+- simd math for quat and mat3 etc.
+- similar simd integration for rigidbody (dedup with particle). Also distance constraints etc. can also support rigidbody, like particle. Basically if particle and rigidbody has similar parts, should de-dup, e.g. externalAcceleration and externalForce are basically the same thing. Maybe rigidbody stores a particle? (Probably shouldn't store ref, cause that's extra entity lookup in hotpath)
+- remove different rigidbody types e.g. EntityType::SphereRigidBody, like particle there is only one EntityType::RigidBody
