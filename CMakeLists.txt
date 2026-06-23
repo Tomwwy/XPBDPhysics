@@ -105,6 +105,24 @@ endif()
 enable_testing()
 add_test(NAME xpbd_foundation COMMAND xpbd_tests)
 
+add_executable(xpbd_gjk_tests tests/gjk_tests.cpp)
+target_link_libraries(xpbd_gjk_tests PRIVATE xpbd)
+if(MSVC)
+    target_compile_options(xpbd_gjk_tests PRIVATE /W4)
+else()
+    target_compile_options(xpbd_gjk_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME xpbd_gjk_epa COMMAND xpbd_gjk_tests)
+
+add_executable(xpbd_gjk_demo examples/gjk_epa_demo.cpp)
+target_include_directories(xpbd_gjk_demo PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+if(MSVC)
+    target_compile_options(xpbd_gjk_demo PRIVATE /W4)
+else()
+    target_compile_options(xpbd_gjk_demo PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+target_link_libraries(xpbd_gjk_demo PRIVATE xpbd raylib)
+
 add_custom_command(TARGET xpbd_physics POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${RAYLIB_DLL}"
@@ -116,5 +134,12 @@ add_custom_command(TARGET xpbd_tetra_rigidbody POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${RAYLIB_DLL}"
         "$<TARGET_FILE_DIR:xpbd_tetra_rigidbody>/raylib.dll"
+    VERBATIM
+)
+
+add_custom_command(TARGET xpbd_gjk_demo POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${RAYLIB_DLL}"
+        "$<TARGET_FILE_DIR:xpbd_gjk_demo>/raylib.dll"
     VERBATIM
 )

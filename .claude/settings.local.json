@@ -6,7 +6,8 @@
       "Bash(cmake --build build --target xpbd)",
       "Bash(cmake --build build --target xpbd_physics)",
       "Bash(git *)",
-      "Bash(D:/MineStuff/Raylib/XPBDPhysics/build/Release/xpbd_tests.exe *)"
+      "Bash(D:/MineStuff/Raylib/XPBDPhysics/build/Release/xpbd_tests.exe *)",
+      "Bash(cmake --build . --target xpbd_gjk_tests)"
     ]
   }
 }

@@ -26,7 +26,16 @@ Next up (tracked in DESIGN.md):
 
 - split narrow phase solver to different files, e.g. GJK, sphere vs sphere, sphere vs tetrahedron etc. — DONE
   (`include/xpbd/narrowphase/`: `contact.hpp` canonical result, `sphere_sphere.hpp`
-  cell, `narrowphase.hpp` dispatch-matrix umbrella; new cells/GJK slot in here.)
+  cell, `gjk.hpp` shared GJK+EPA convex-convex cell, `narrowphase.hpp` dispatch-matrix
+  umbrella; new cells slot in here.)
+
+- generic GJK + EPA convex-convex narrowphase — DONE
+  (`include/xpbd/narrowphase/gjk.hpp`: support-function GJK distance + EPA
+  penetration on a core-skeleton + rounding-radius model, so sphere / capsule /
+  box / tetra / hull all share one path. EPA seeds from GJK's terminating
+  simplex for robustness. Tests: `tests/gjk_tests.cpp` (`xpbd_gjk_epa` in CTest).
+  Visual test: `examples/gjk_epa_demo.cpp`, built as `xpbd_gjk_demo` — two movable
+  convex shapes with a contact-normal arrow scaled by penetration depth.)
 
 
 - Maybe turn functions like colliderWorldSphere/colliderIsActiveAndIsSphere/computeColliderWorldSphere to function template to check if valid and return world space shapes? — DONE
@@ -61,3 +70,4 @@ All contacts use the global `contactCompliance_`. Different material pairs (clot
 - simd math for quat and mat3 etc.
 - similar simd integration for rigidbody (dedup with particle). Also distance constraints etc. can also support rigidbody, like particle. Basically if particle and rigidbody has similar parts, should de-dup, e.g. externalAcceleration and externalForce are basically the same thing. Maybe rigidbody stores a particle? (Probably shouldn't store ref, cause that's extra entity lookup in hotpath)
 - remove different rigidbody types e.g. EntityType::SphereRigidBody, like particle there is only one EntityType::RigidBody
+- Current rigidbody seems to be only spheres at convex geometry corners? e.g. generate Contact and solve Contact? Implement actual rigidbody dynamics
