@@ -200,51 +200,63 @@ inline bool reduceSimplex(std::array<SupportVertex, 4>& simplex, int& n,
         return true;
     }
 
-    // n == 4: test the origin against the three faces sharing the newest vertex
-    // (index 3). Keep the face whose plane the origin is outside of (pointing
-    // away from the 4th vertex); if outside none, the origin is enclosed.
-    const Vec3& A = simplex[0].v;
-    const Vec3& B = simplex[1].v;
-    const Vec3& C = simplex[2].v;
-    const Vec3& D = simplex[3].v;
-
+    // n == 4: decide whether the origin is enclosed by the tetrahedron, and if
+    // not, reduce to the boundary face closest to the origin.
+    //
+    // Two robustness points the naive "test the 3 faces touching the newest
+    // vertex" version gets wrong on polytopes (boxes especially):
+    //   1. All four faces must be considered. The 3-face shortcut is only valid
+    //      if the search direction is guaranteed to be the previous triangle's
+    //      face normal; here the n==3 branch does not reduce to its minimal
+    //      sub-feature, so that guarantee does not hold and the base face {A,B,C}
+    //      cannot be skipped. Skipping it reports false enclosures.
+    //   2. A box vs a point/segment produces flat (near-coplanar) Minkowski
+    //      simplices constantly. A degenerate tetra has zero volume and cannot
+    //      enclose the origin, but the per-face sign test reads ~0 as "inside"
+    //      and again reports a false enclosure. Guard on relative volume first.
+    const Vec3 V[4] = {simplex[0].v, simplex[1].v, simplex[2].v, simplex[3].v};
     struct Face { int i0, i1, i2, opp; };
-    const Face faces[3] = {{0, 1, 3, 2}, {1, 2, 3, 0}, {2, 0, 3, 1}};
-    const Vec3 verts[4] = {A, B, C, D};
+    const Face faces[4] = {{0, 1, 2, 3}, {0, 2, 3, 1}, {0, 3, 1, 2}, {1, 3, 2, 0}};
 
+    const Vec3 e1 = V[1] - V[0], e2 = V[2] - V[0], e3 = V[3] - V[0];
+    const float vol6 = std::fabs(dot(cross(e1, e2), e3));
+    const float scale = std::sqrt(lengthSq(e1)) * std::sqrt(lengthSq(e2)) * std::sqrt(lengthSq(e3));
+    const bool degenerate = scale < 1e-20f || vol6 < 1e-4f * scale;
+
+    if (!degenerate) {
+        // Enclosed iff the origin is on the same side of every face as that
+        // face's opposing vertex.
+        bool inside = true;
+        for (const Face& f : faces) {
+            const Vec3 nrm = cross(V[f.i1] - V[f.i0], V[f.i2] - V[f.i0]);
+            const float sideD = dot(nrm, V[f.opp] - V[f.i0]);
+            const float sideO = dot(nrm, Vec3{} - V[f.i0]);
+            if (sideD * sideO < 0.0f) {  // origin strictly outside this face
+                inside = false;
+                break;
+            }
+        }
+        if (inside) {
+            return false;  // origin enclosed -> overlap, hand n==4 simplex to EPA
+        }
+    }
+
+    // Not enclosed (or degenerate): keep the face whose clamped closest point is
+    // nearest the origin. closestOnTriangle clamps to the triangle, so the min
+    // over all four faces is the closest point on the tetra boundary.
     float bestDistSq = 3.4e38f;
-    int bestFace = -1;
-    float bestW[3] = {0, 0, 0};
-    bool anyOutside = false;
-
+    int bestFace = 0;
+    float bestW[3] = {1.0f, 0.0f, 0.0f};
     for (const Face& f : faces) {
-        const Vec3& p0 = verts[f.i0];
-        const Vec3& p1 = verts[f.i1];
-        const Vec3& p2 = verts[f.i2];
-        Vec3 nrm = cross(p1 - p0, p2 - p0);
-        // Orient the normal away from the opposing vertex.
-        if (dot(nrm, verts[f.opp] - p0) > 0.0f) {
-            nrm = Vec3{} - nrm;
-        }
-        // Is the origin on the outer side of this face?
-        if (dot(nrm, Vec3{} - p0) <= 0.0f) {
-            continue;  // origin inside this face's halfspace
-        }
-        anyOutside = true;
-
         float wa, wb, wc;
-        closestOnTriangle(p0, p1, p2, wa, wb, wc);
-        const Vec3 closest = p0 * wa + p1 * wb + p2 * wc;
+        closestOnTriangle(V[f.i0], V[f.i1], V[f.i2], wa, wb, wc);
+        const Vec3 closest = V[f.i0] * wa + V[f.i1] * wb + V[f.i2] * wc;
         const float distSq = lengthSq(closest);
         if (distSq < bestDistSq) {
             bestDistSq = distSq;
             bestFace = static_cast<int>(&f - faces);
             bestW[0] = wa; bestW[1] = wb; bestW[2] = wc;
         }
-    }
-
-    if (!anyOutside) {
-        return false;  // origin enclosed -> overlap
     }
 
     const Face& f = faces[bestFace];

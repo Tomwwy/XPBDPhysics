@@ -7,10 +7,12 @@
 // branches: cleanly separated (no contact), separated cores with overlapping
 // rounding shells (sphere/capsule fast path), and overlapping cores (EPA).
 #include "xpbd/narrowphase/gjk.hpp"
+#include "xpbd/quat.hpp"
 
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <random>
 
 namespace {
 
@@ -224,6 +226,91 @@ void testContactPointBetweenSurfaces()
     check(c.point.x > 0.5f && c.point.x < 1.0f, "contact point lies inside the overlap region");
 }
 
+// --- Rotated-hull robustness (regression for the reduceSimplex tetra bug) ----
+//
+// A box vs a point/segment generates flat (near-coplanar) Minkowski simplices,
+// and the GJK tetrahedron test used to (a) only check the 3 faces touching the
+// newest vertex and (b) ignore degeneracy. Both made it report the origin as
+// enclosed when the cores were actually separated, so GJK falsely flagged
+// intersection and EPA returned a garbage normal/penetration on shapes that
+// were not touching. These randomized cases drive a rotated box against a
+// sphere and check the analytic answer in the box's local frame.
+
+std::array<Vec3, 8> rotatedBox(const Vec3& c, float h, const Quat& q)
+{
+    const std::array<Vec3, 8> local = {
+        Vec3{-h, -h, -h}, Vec3{h, -h, -h}, Vec3{h, h, -h}, Vec3{-h, h, -h},
+        Vec3{-h, -h, h},  Vec3{h, -h, h},  Vec3{h, h, h},  Vec3{-h, h, h}};
+    std::array<Vec3, 8> world{};
+    for (std::size_t i = 0; i < 8; ++i) world[i] = c + rotate(q, local[i]);
+    return world;
+}
+
+// Sphere centered OUTSIDE a rotated box face (nearest feature is the face):
+// separated cores. With a small enough rounding shell the pair must not touch,
+// and when it does touch the normal is the rotated face axis.
+void testRotatedBoxSphereSeparated()
+{
+    std::mt19937 rng(12345);
+    std::uniform_real_distribution<float> U(-1.0f, 1.0f), Pos(0.0f, 1.0f);
+    const float h = 0.8f, rb = 0.3f;
+    int falsePositives = 0, wrongNormals = 0;
+
+    for (int t = 0; t < 5000; ++t) {
+        const Vec3 axis = normalized(Vec3{U(rng), U(rng), U(rng)} + Vec3{0, 0, 1e-3f});
+        const Quat q = Quat::fromAxisAngle(axis, U(rng) * 3.14159f);
+        const Vec3 ca{U(rng) * 0.5f, U(rng) * 0.5f, U(rng) * 0.5f};
+        const auto verts = rotatedBox(ca, h, q);
+        GjkHull box{verts.data(), 8};
+
+        // Center beyond the +local-x face by `gap`, with y/z inside the face.
+        const float gap = 0.05f + Pos(rng) * 0.6f;
+        const Vec3 center = ca + rotate(q, Vec3{h + gap, U(rng) * 0.5f, U(rng) * 0.5f});
+        GjkSphere sphere{center, rb};
+        const Contact c = gjkEpaContact(box, sphere);
+
+        const bool shouldTouch = gap < rb;  // box rounding radius is 0
+        if (c.touching != shouldTouch) ++falsePositives;
+        if (c.touching) {
+            const Vec3 trueN = rotate(q, Vec3{1.0f, 0.0f, 0.0f});
+            if (dot(normalized(c.normal), trueN) < 0.95f) ++wrongNormals;
+        }
+    }
+    check(falsePositives == 0, "rotated box vs external sphere: no false contacts");
+    check(wrongNormals == 0, "rotated box vs external sphere: normal is the face axis");
+}
+
+// Sphere centered INSIDE a rotated box: overlapping cores. The reported normal
+// must actually separate the pair (push the sphere out by depth*normal and the
+// shapes must come apart).
+void testRotatedBoxSphereOverlap()
+{
+    std::mt19937 rng(67890);
+    std::uniform_real_distribution<float> U(-1.0f, 1.0f);
+    const float h = 0.8f, rb = 0.3f;
+    int badSeparations = 0;
+
+    for (int t = 0; t < 5000; ++t) {
+        const Vec3 axis = normalized(Vec3{U(rng), U(rng), U(rng)} + Vec3{0, 0, 1e-3f});
+        const Quat q = Quat::fromAxisAngle(axis, U(rng) * 3.14159f);
+        const Vec3 ca{U(rng) * 0.5f, U(rng) * 0.5f, U(rng) * 0.5f};
+        const auto verts = rotatedBox(ca, h, q);
+        GjkHull box{verts.data(), 8};
+
+        const Vec3 center = ca + rotate(q, Vec3{U(rng) * 0.6f, U(rng) * 0.6f, U(rng) * 0.6f});
+        GjkSphere sphere{center, rb};
+        const Contact c = gjkEpaContact(box, sphere);
+        if (!c.touching) continue;
+
+        // Push the sphere out along the contact normal by the full depth + slack.
+        GjkSphere pushed{center + c.normal * (c.penetration + 0.05f), rb};
+        const Contact after = gjkEpaContact(box, pushed);
+        const float residual = after.touching ? after.penetration : 0.0f;
+        if (residual > 0.1f) ++badSeparations;
+    }
+    check(badSeparations == 0, "rotated box vs inside sphere: normal separates the pair");
+}
+
 }  // namespace
 
 int main()
@@ -242,6 +329,8 @@ int main()
     testTetraSeparated();
     testNormalAntisymmetry();
     testContactPointBetweenSurfaces();
+    testRotatedBoxSphereSeparated();
+    testRotatedBoxSphereOverlap();
 
     if (gFailures == 0) {
         std::printf("All GJK/EPA tests passed.\n");

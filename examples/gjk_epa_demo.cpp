@@ -271,8 +271,17 @@ int main()
 
         BeginMode3D(cameraController.camera());
         DrawGrid(40, 0.5f);
+
+        // The bodies are translucent so the contact arrows underneath stay
+        // visible. Translucent geometry must NOT write the depth buffer: if it
+        // did, its own faces would z-reject each other (some faces vanish) and
+        // it would occlude the arrows drawn afterwards. Disable depth writes for
+        // the bodies, draw the arrows with depth writes back on so they read
+        // crisp on top. (Depth *testing* stays on throughout.)
+        rlDisableDepthMask();
         drawBody(bodyA, cornersA);
         drawBody(bodyB, cornersB);
+        rlEnableDepthMask();
 
         if (contact.touching) {
             // Contact point.
