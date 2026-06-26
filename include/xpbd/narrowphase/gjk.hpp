@@ -411,7 +411,7 @@ inline void epaFaceNormal(const std::vector<SupportVertex>& verts, EpaFace& f) {
 
 template <class ShapeA, class ShapeB>
 EpaResult epaPenetration(const ShapeA& a, const ShapeB& b, const GjkResult& seed,
-                         int maxIterations = 48) {
+                         int maxIterations = 20) {
     EpaResult out;
 
     // EPA expands the polytope GJK left enclosing the origin. Start from GJK's
@@ -498,7 +498,11 @@ EpaResult epaPenetration(const ShapeA& a, const ShapeB& b, const GjkResult& seed
         const SupportVertex w = minkowskiSupport(a, b, dir);
         const float newDist = dot(w.v, dir);
 
-        if (newDist - faceDist < 1e-4f) {
+        // Relative convergence tolerance: the support point must advance
+        // less than 0.01% beyond the face to stop. Scaled by face distance
+        // so large objects and small objects converge at the same quality.
+        const float eps = 1e-4f * (faceDist > 1.0f ? faceDist : 1.0f);
+        if (newDist - faceDist < eps) {
             // Converged: this face is on the Minkowski-difference boundary.
             const EpaFace& f = faces[static_cast<std::size_t>(closest)];
             float wa, wb, wc;

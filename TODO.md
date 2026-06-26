@@ -67,7 +67,9 @@ All contacts use the global `contactCompliance_`. Different material pairs (clot
 **`tests/foundation_tests.cpp`** — The test binary is built but there's no `add_test()` or `enable_testing()` in CMakeLists.txt. Running tests requires manually executing the binary.
 
 
-- simd math for quat and mat3 etc.
+- simd math for quat and mat3 and cross product etc., also kernels like GjkHull support function
 - similar simd integration for rigidbody (dedup with particle). Also distance constraints etc. can also support rigidbody, like particle. Basically if particle and rigidbody has similar parts, should de-dup, e.g. externalAcceleration and externalForce are basically the same thing. Maybe rigidbody stores a particle? (Probably shouldn't store ref, cause that's extra entity lookup in hotpath)
 - remove different rigidbody types e.g. EntityType::SphereRigidBody, like particle there is only one EntityType::RigidBody
 - Current rigidbody seems to be only spheres at convex geometry corners? e.g. generate Contact and solve Contact? Implement actual rigidbody dynamics
+
+- Relation between Contact struct, ContactConstraint and BodyResponse? 
