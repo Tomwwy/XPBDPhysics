@@ -523,7 +523,7 @@ EpaResult epaPenetration(const ShapeA& a, const ShapeB& b, const GjkResult& seed
         std::vector<std::array<int, 2>> horizon;
         for (int i = static_cast<int>(faces.size()) - 1; i >= 0; --i) {
             const EpaFace& f = faces[static_cast<std::size_t>(i)];
-            if (dot(f.normal, w.v - verts[f.a].v) > 1e-9f) {
+            if (dot(f.normal, w.v - verts[f.a].v) > 1e-6f) {
                 addHorizonEdge(horizon, f.a, f.b);
                 addHorizonEdge(horizon, f.b, f.c);
                 addHorizonEdge(horizon, f.c, f.a);
